@@ -1,0 +1,24 @@
+[package]
+name = "hush-type"
+version = "0.3.2"
+description = "A private, bring-your-own-model voice dictation app"
+authors = ["HushType"]
+edition = "2021"
+
+[lib]
+name = "hush_type_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+arboard = "3"
+enigo = "0.3"
+uuid = { version = "1", features = ["v4"] }
