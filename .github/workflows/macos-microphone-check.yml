@@ -1,0 +1,146 @@
+name: Verify macOS microphone build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/macos-microphone-check.yml"
+      - "src-tauri/entitlements.plist"
+      - "src-tauri/Info.plist"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/src/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/macos-microphone-check.yml"
+      - "src-tauri/entitlements.plist"
+      - "src-tauri/Info.plist"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/src/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-microphone-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-verify:
+    name: Build and verify universal macOS app
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate source property lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          plutil -lint src-tauri/Info.plist
+          plutil -lint src-tauri/entitlements.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' src-tauri/entitlements.plist)" = "true"
+
+      - name: Build universal macOS app
+        run: npm run tauri -- build --target universal-apple-darwin --bundles app
+
+      - name: Verify microphone metadata and signed entitlement
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/HushType.app"
+          ENTITLEMENTS_PATH="$RUNNER_TEMP/signed-entitlements.plist"
+          REPORT_PATH="$RUNNER_TEMP/macos-verification.txt"
+
+          test -d "$APP_PATH"
+          EXECUTABLE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")
+          BINARY_PATH="$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"
+          test -x "$BINARY_PATH"
+
+          MICROPHONE_REASON=$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP_PATH/Contents/Info.plist")
+          test -n "$MICROPHONE_REASON"
+
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" > "$ENTITLEMENTS_PATH"
+          plutil -lint "$ENTITLEMENTS_PATH"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$ENTITLEMENTS_PATH")" = "true"
+
+          ARCHITECTURES=$(lipo -archs "$BINARY_PATH")
+          grep -qw "arm64" <<< "$ARCHITECTURES"
+          grep -qw "x86_64" <<< "$ARCHITECTURES"
+
+          {
+            echo "HushType macOS microphone verification"
+            echo
+            sw_vers
+            echo
+            echo "Runner architecture: $(uname -m)"
+            echo "App architectures: $ARCHITECTURES"
+            echo "Microphone usage description: $MICROPHONE_REASON"
+            echo
+            echo "Signed entitlements:"
+            plutil -p "$ENTITLEMENTS_PATH"
+            echo
+            echo "Code signature:"
+            codesign -dv --verbose=4 "$APP_PATH" 2>&1
+          } | tee "$REPORT_PATH"
+
+          VERSION=$(node -p "require('./package.json').version")
+          ARCHIVE_PATH="$RUNNER_TEMP/HushType_${VERSION}_universal_macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ARCHIVE_PATH"
+
+          echo "archive_path=$ARCHIVE_PATH" >> "$GITHUB_OUTPUT"
+          echo "entitlements_path=$ENTITLEMENTS_PATH" >> "$GITHUB_OUTPUT"
+          echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload universal macOS app
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.verify.outputs.archive_path }}
+          archive: false
+          retention-days: 14
+
+      - name: Upload verification report
+        uses: actions/upload-artifact@v7
+        with:
+          name: HushType-macOS-verification
+          path: |
+            ${{ steps.verify.outputs.entitlements_path }}
+            ${{ steps.verify.outputs.report_path }}
+          retention-days: 14
