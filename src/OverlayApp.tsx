@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Mic, Sparkles, X } from "lucide-react";
+import { Check, CircleAlert, Mic, Sparkles, X } from "lucide-react";
 import { onOverlayState, requestOverlayCancel, startOverlayDrag, type OverlayPayload } from "./lib/bridge";
 
 const initial: OverlayPayload = {
@@ -7,6 +7,14 @@ const initial: OverlayPayload = {
   state: "idle",
   profileName: "Dictation",
   cleanupEnabled: false,
+};
+
+const stateLabel: Record<OverlayPayload["state"], string> = {
+  idle: "Ready",
+  recording: "Listening",
+  processing: "Working",
+  success: "Pasted",
+  error: "Something went wrong",
 };
 
 export default function OverlayApp() {
@@ -18,27 +26,26 @@ export default function OverlayApp() {
     return () => { unlisten(); document.documentElement.classList.remove("overlay-document"); };
   }, []);
 
+  const icon = payload.state === "success"
+    ? <Check size={15} strokeWidth={2.4} />
+    : payload.state === "error"
+      ? <CircleAlert size={15} strokeWidth={2.2} />
+      : payload.cleanupEnabled ? <Sparkles size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />;
+
   return (
-    <div
-      className={`floating-overlay state-${payload.state}`}
-      onMouseDown={(event) => {
-        if (event.button === 0 && !(event.target as HTMLElement).closest("button")) {
-          void startOverlayDrag();
-        }
-      }}
-      title="Drag to move"
-    >
-      <div className="overlay-mode-icon">
-        {payload.state === "success" ? <Check size={18} /> : payload.cleanupEnabled ? <Sparkles size={18} /> : <Mic size={18} />}
+    <div className="overlay-stage">
+      <div
+        className={`overlay-pill state-${payload.state}`}
+        onMouseDown={(event) => {
+          if (event.button === 0 && !(event.target as HTMLElement).closest("button")) {
+            void startOverlayDrag();
+          }
+        }}
+        title={`${payload.profileName} · ${stateLabel[payload.state]} — drag to move`}
+      >
+        <div className="overlay-icon">{icon}</div>
+        <button className="overlay-cancel" onClick={() => void requestOverlayCancel()} title="Cancel and discard" aria-label="Cancel and discard"><X size={13} strokeWidth={2.4} /></button>
       </div>
-      <div className="overlay-copy">
-        <strong>{payload.profileName}</strong>
-        <span>{payload.state === "recording" ? "Listening" : payload.state === "processing" ? "Running pipeline" : payload.state === "success" ? "Pasted" : payload.state === "error" ? "Something went wrong" : "Ready"}</span>
-      </div>
-      <div className="overlay-wave" aria-hidden="true">
-        {Array.from({ length: 9 }, (_, index) => <i key={index} style={{ animationDelay: `${index * -0.07}s` }} />)}
-      </div>
-      <button className="overlay-cancel" onClick={() => void requestOverlayCancel()} title="Cancel and discard"><X size={16} /></button>
     </div>
   );
 }

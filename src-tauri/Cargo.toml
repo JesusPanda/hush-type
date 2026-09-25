@@ -20,5 +20,6 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
 arboard = "3"
+base64 = "0.22"
 enigo = "0.3"
 uuid = { version = "1", features = ["v4"] }
