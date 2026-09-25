@@ -6,6 +6,7 @@ import type {
   ModelOption,
   PipelineStage,
   ProviderSettings,
+  ProviderTestResult,
   RecordingState,
   TranscriptionResult,
 } from "../types";
@@ -47,6 +48,17 @@ export async function listModels(
 ): Promise<ModelOption[]> {
   if (!isTauri()) return [];
   return invoke<ModelOption[]>("list_models", { profileId, stage, provider, apiKey });
+}
+
+/** Runs one stage with unsaved settings: transcription re-sends the last recording, cleanup sends sample text. */
+export async function testProvider(
+  profileId: string,
+  stage: PipelineStage,
+  provider: ProviderSettings,
+  systemPrompt?: string,
+): Promise<ProviderTestResult> {
+  if (!isTauri()) throw new Error("Testing requests needs the desktop app.");
+  return invoke<ProviderTestResult>("test_provider", { profileId, stage, provider, systemPrompt });
 }
 
 export async function transcribe(
@@ -92,6 +104,18 @@ export async function saveHistory(items: HistoryItem[]): Promise<void> {
     return;
   }
   await invoke("save_history", { items });
+}
+
+/** Saves a recording whose transcription failed. Returns the file path, or null outside the desktop app. */
+export async function saveFailedRecording(audio: Uint8Array, mimeType: string, fileStem: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("save_failed_recording", { audio: Array.from(audio), mimeType, fileStem });
+}
+
+/** Opens the failed-recordings folder, selecting `path` if given. */
+export async function showFailedRecording(path?: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("show_failed_recording", { path });
 }
 
 export async function onShortcut(callback: (profileId: string) => void): Promise<UnlistenFn> {

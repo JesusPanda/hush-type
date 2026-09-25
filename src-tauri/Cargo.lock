@@ -1437,6 +1437,7 @@ name = "hush-type"
 version = "0.3.2"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "enigo",
  "keyring",
  "reqwest 0.12.28",

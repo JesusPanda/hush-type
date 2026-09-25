@@ -9,6 +9,8 @@ interface Recording {
 export interface StopOptions {
   trimSilence: boolean;
   thresholdDb: number;
+  /** Re-encode as 16 kHz mono WAV even when silence trimming is off. */
+  forceWav?: boolean;
 }
 
 const writeText = (view: DataView, offset: number, text: string) => {
@@ -54,7 +56,7 @@ const resample = (samples: Float32Array, sourceRate: number, targetRate = 16000)
   return output;
 };
 
-async function trimToSpeech(blob: Blob, thresholdDb: number): Promise<Recording | null> {
+async function decodeMono(blob: Blob) {
   const context = new AudioContext();
   try {
     const audio = await context.decodeAudioData(await blob.arrayBuffer());
@@ -63,52 +65,66 @@ async function trimToSpeech(blob: Blob, thresholdDb: number): Promise<Recording 
       const data = audio.getChannelData(channel);
       for (let index = 0; index < data.length; index += 1) mono[index] += data[index] / audio.numberOfChannels;
     }
-    const frameSize = Math.max(1, Math.round(audio.sampleRate * 0.02));
-    const threshold = 10 ** (thresholdDb / 20);
-    const active: boolean[] = [];
-    for (let offset = 0; offset < mono.length; offset += frameSize) {
-      let energy = 0;
-      const end = Math.min(mono.length, offset + frameSize);
-      for (let index = offset; index < end; index += 1) energy += mono[index] * mono[index];
-      active.push(Math.sqrt(energy / Math.max(1, end - offset)) >= threshold);
-    }
-    const firstActive = active.indexOf(true);
-    const lastActive = active.lastIndexOf(true);
-    if (firstActive < 0) return null;
-
-    const paddingFrames = Math.ceil(0.12 / 0.02);
-    const minGapFrames = Math.ceil(0.65 / 0.02);
-    const firstFrame = Math.max(0, firstActive - paddingFrames);
-    const lastFrame = Math.min(active.length, lastActive + paddingFrames + 1);
-    const ranges: Array<[number, number]> = [];
-    let rangeStart = firstFrame;
-    let frame = firstFrame;
-    while (frame < lastFrame) {
-      if (active[frame]) { frame += 1; continue; }
-      const silenceStart = frame;
-      while (frame < lastFrame && !active[frame]) frame += 1;
-      if (frame - silenceStart >= minGapFrames) {
-        ranges.push([rangeStart, Math.min(lastFrame, silenceStart + paddingFrames)]);
-        rangeStart = Math.max(firstFrame, frame - paddingFrames);
-      }
-    }
-    ranges.push([rangeStart, lastFrame]);
-
-    const sampleRanges = ranges
-      .map(([start, end]) => [start * frameSize, Math.min(mono.length, end * frameSize)] as const)
-      .filter(([start, end]) => end > start);
-    const totalSamples = sampleRanges.reduce((sum, [start, end]) => sum + end - start, 0);
-    const compact = new Float32Array(totalSamples);
-    let writeOffset = 0;
-    for (const [start, end] of sampleRanges) {
-      compact.set(mono.subarray(start, end), writeOffset);
-      writeOffset += end - start;
-    }
-    const downsampled = resample(compact, audio.sampleRate, 16000);
-    return { bytes: encodeWav(downsampled, 16000), mimeType: "audio/wav", durationMs: Math.round((downsampled.length / 16000) * 1000) };
+    return { mono, sampleRate: audio.sampleRate };
   } finally {
     await context.close();
   }
+}
+
+const toWavRecording = (samples: Float32Array, sampleRate: number): Recording => {
+  const downsampled = resample(samples, sampleRate, 16000);
+  return { bytes: encodeWav(downsampled, 16000), mimeType: "audio/wav", durationMs: Math.round((downsampled.length / 16000) * 1000) };
+};
+
+async function convertToWav(blob: Blob): Promise<Recording> {
+  const { mono, sampleRate } = await decodeMono(blob);
+  return toWavRecording(mono, sampleRate);
+}
+
+async function trimToSpeech(blob: Blob, thresholdDb: number): Promise<Recording | null> {
+  const { mono, sampleRate } = await decodeMono(blob);
+  const frameSize = Math.max(1, Math.round(sampleRate * 0.02));
+  const threshold = 10 ** (thresholdDb / 20);
+  const active: boolean[] = [];
+  for (let offset = 0; offset < mono.length; offset += frameSize) {
+    let energy = 0;
+    const end = Math.min(mono.length, offset + frameSize);
+    for (let index = offset; index < end; index += 1) energy += mono[index] * mono[index];
+    active.push(Math.sqrt(energy / Math.max(1, end - offset)) >= threshold);
+  }
+  const firstActive = active.indexOf(true);
+  const lastActive = active.lastIndexOf(true);
+  if (firstActive < 0) return null;
+
+  const paddingFrames = Math.ceil(0.12 / 0.02);
+  const minGapFrames = Math.ceil(0.65 / 0.02);
+  const firstFrame = Math.max(0, firstActive - paddingFrames);
+  const lastFrame = Math.min(active.length, lastActive + paddingFrames + 1);
+  const ranges: Array<[number, number]> = [];
+  let rangeStart = firstFrame;
+  let frame = firstFrame;
+  while (frame < lastFrame) {
+    if (active[frame]) { frame += 1; continue; }
+    const silenceStart = frame;
+    while (frame < lastFrame && !active[frame]) frame += 1;
+    if (frame - silenceStart >= minGapFrames) {
+      ranges.push([rangeStart, Math.min(lastFrame, silenceStart + paddingFrames)]);
+      rangeStart = Math.max(firstFrame, frame - paddingFrames);
+    }
+  }
+  ranges.push([rangeStart, lastFrame]);
+
+  const sampleRanges = ranges
+    .map(([start, end]) => [start * frameSize, Math.min(mono.length, end * frameSize)] as const)
+    .filter(([start, end]) => end > start);
+  const totalSamples = sampleRanges.reduce((sum, [start, end]) => sum + end - start, 0);
+  const compact = new Float32Array(totalSamples);
+  let writeOffset = 0;
+  for (const [start, end] of sampleRanges) {
+    compact.set(mono.subarray(start, end), writeOffset);
+    writeOffset += end - start;
+  }
+  return toWavRecording(compact, sampleRate);
 }
 
 export function useRecorder() {
@@ -197,6 +213,13 @@ export function useRecorder() {
         } catch (cause) {
           if (cause instanceof Error && cause.message.includes("No speech")) { reject(cause); return; }
           // If this WebView cannot decode its MediaRecorder format, safely fall back to the original audio.
+        }
+      } else if (options.forceWav) {
+        try {
+          resolve(await convertToWav(blob));
+          return;
+        } catch {
+          // Fall back to the original audio; the provider will report whether it accepts it.
         }
       }
       resolve({ bytes: new Uint8Array(await blob.arrayBuffer()), mimeType: recorder.mimeType || blob.type, durationMs: originalDurationMs });

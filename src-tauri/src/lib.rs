@@ -1,8 +1,11 @@
+mod adapters;
+
+use adapters::{KeyValue, RequestTemplate, Vars};
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 use keyring::Entry;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     collections::HashSet, fs, path::PathBuf, str::FromStr, sync::Mutex, thread, time::Duration,
 };
@@ -28,6 +31,27 @@ struct ProviderSettings {
     model: String,
     #[serde(default)]
     api_key_set: bool,
+    /// `openai` for OpenAI-compatible calls, `template` for a custom request template.
+    #[serde(default = "default_format")]
+    format: String,
+    /// Extra fields merged into OpenAI-compatible requests. A value of `null` removes a default field.
+    #[serde(default)]
+    extra_params: Vec<KeyValue>,
+    #[serde(default)]
+    template: RequestTemplate,
+    /// Frontend hint: always upload 16 kHz WAV, for APIs that reject WebM.
+    #[serde(default)]
+    force_wav: bool,
+}
+
+fn default_format() -> String {
+    "openai".into()
+}
+
+impl ProviderSettings {
+    fn uses_template(&self) -> bool {
+        self.format == "template"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +120,10 @@ fn groq_transcription() -> ProviderSettings {
         models_endpoint: "https://api.groq.com/openai/v1/models".into(),
         model: "whisper-large-v3-turbo".into(),
         api_key_set: false,
+        format: default_format(),
+        extra_params: Vec::new(),
+        template: RequestTemplate::default(),
+        force_wav: false,
     }
 }
 
@@ -106,6 +134,10 @@ fn cerebras_cleanup() -> ProviderSettings {
         models_endpoint: "https://api.cerebras.ai/v1/models".into(),
         model: "gpt-oss-120b".into(),
         api_key_set: false,
+        format: default_format(),
+        extra_params: Vec::new(),
+        template: RequestTemplate::default(),
+        force_wav: false,
     }
 }
 
@@ -211,6 +243,8 @@ struct ModelOption {
 struct AppState {
     settings: Mutex<AppSettings>,
     config_dir: PathBuf,
+    /// Most recent recording, kept in memory only so templates can be tested.
+    last_audio: Mutex<Option<(Vec<u8>, String)>>,
 }
 
 fn settings_path(config_dir: &PathBuf) -> PathBuf {
@@ -221,12 +255,74 @@ fn history_path(config_dir: &PathBuf) -> PathBuf {
     config_dir.join("history.json")
 }
 
+fn failed_recordings_dir(config_dir: &PathBuf) -> PathBuf {
+    config_dir.join("failed-recordings")
+}
+
+/// Keeps a recording whose transcription failed so it isn't lost. Returns the saved file's path.
+#[tauri::command]
+fn save_failed_recording(
+    state: State<'_, AppState>,
+    audio: Vec<u8>,
+    mime_type: String,
+    file_stem: String,
+) -> Result<String, String> {
+    let dir = failed_recordings_dir(&state.config_dir);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let stem: String = file_stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let stem = if stem.is_empty() { uuid::Uuid::new_v4().to_string() } else { stem };
+    let extension = audio_extension(&mime_type);
+    let mut path = dir.join(format!("{stem}.{extension}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.{extension}"));
+        n += 1;
+    }
+    fs::write(&path, &audio).map_err(|error| format!("Could not save the recording: {error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Opens the failed-recordings folder, selecting `path` when it is a file inside it.
+#[tauri::command]
+fn show_failed_recording(state: State<'_, AppState>, path: Option<String>) -> Result<(), String> {
+    let dir = failed_recordings_dir(&state.config_dir);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let file = path
+        .map(PathBuf::from)
+        .filter(|file| file.is_file() && file.parent() == Some(dir.as_path()));
+    #[cfg(target_os = "windows")]
+    let result = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer");
+        match &file {
+            Some(file) => command.raw_arg(format!("/select,\"{}\"", file.display())),
+            None => command.arg(&dir),
+        };
+        command.spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let result = match &file {
+        Some(file) => std::process::Command::new("open").arg("-R").arg(file).spawn(),
+        None => std::process::Command::new("open").arg(&dir).spawn(),
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    result
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the folder: {error}"))
+}
+
 fn default_models_endpoint(provider: &str) -> &'static str {
     match provider {
         "groq" => "https://api.groq.com/openai/v1/models",
         "cerebras" => "https://api.cerebras.ai/v1/models",
         "gemini" => "https://generativelanguage.googleapis.com/v1beta/models",
         "openai" => "https://api.openai.com/v1/models",
+        "anthropic" => "https://api.anthropic.com/v1/models",
+        "deepgram" => "https://api.deepgram.com/v1/models",
         _ => "",
     }
 }
@@ -569,33 +665,327 @@ fn save_history(state: State<'_, AppState>, items: Vec<HistoryItem>) -> Result<(
     .map_err(|error| format!("Could not save history: {error}"))
 }
 
-fn profile_provider<'a>(profile: &'a DictationProfile, stage: &str) -> &'a ProviderSettings {
-    if stage == "transcription" {
-        &profile.transcription
+/// Looks up the key for `provider`, falling back to the transcription key when both stages share a provider.
+fn stored_key(
+    profile: &DictationProfile,
+    stage: &str,
+    provider: &ProviderSettings,
+    supplied_key: Option<String>,
+) -> Option<String> {
+    if let Some(key) = supplied_key.filter(|key| !key.trim().is_empty()) {
+        return Some(key.trim().to_string());
+    }
+    get_credential(&credential_account(stage, provider))
+        .ok()
+        .or_else(|| {
+            (stage == "cleanup" && providers_can_share_key(provider, &profile.transcription))
+                .then(|| get_credential(&credential_account("transcription", &profile.transcription)).ok())
+                .flatten()
+        })
+}
+
+fn provider_needs_key(provider: &ProviderSettings) -> bool {
+    if provider.uses_template() {
+        provider.template.references("api_key") || adapters::mentions(&provider.endpoint, "api_key")
     } else {
-        &profile.cleanup
+        // Self-hosted OpenAI-compatible servers often run without authentication.
+        provider.provider != "custom"
     }
 }
 
-fn credential_for_profile(
+fn key_for_request(
     profile: &DictationProfile,
     stage: &str,
+    provider: &ProviderSettings,
     supplied_key: Option<String>,
 ) -> Result<String, String> {
-    if let Some(key) = supplied_key.filter(|key| !key.trim().is_empty()) {
-        return Ok(key);
+    match stored_key(profile, stage, provider, supplied_key) {
+        Some(key) => Ok(key),
+        None if !provider_needs_key(provider) => Ok(String::new()),
+        None => Err(format!(
+            "No API key is saved for the {} provider. Open Settings to add one.",
+            provider.provider
+        )),
     }
-    let provider = profile_provider(profile, stage);
-    get_credential(&credential_account(stage, provider)).or_else(|_| {
-        if stage == "cleanup" && providers_can_share_key(&profile.cleanup, &profile.transcription) {
-            get_credential(&credential_account("transcription", &profile.transcription))
+}
+
+fn locale_for(language: &str) -> String {
+    match language {
+        "en" => "en-US",
+        "it" => "it-IT",
+        "es" => "es-ES",
+        "fr" => "fr-FR",
+        "de" => "de-DE",
+        "pt" => "pt-BR",
+        "ja" => "ja-JP",
+        "zh" => "zh-CN",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Values available to `{{placeholders}}` in endpoints, headers, fields, and bodies.
+fn stage_vars(
+    profile: &DictationProfile,
+    provider: &ProviderSettings,
+    key: &str,
+    text: &str,
+    mime_type: &str,
+) -> Vars {
+    let language = if profile.language == "auto" {
+        String::new()
+    } else {
+        profile.language.trim().to_string()
+    };
+    let locale = if language.is_empty() {
+        String::new()
+    } else {
+        locale_for(&language)
+    };
+    let json_list = |value: &str| {
+        if value.is_empty() {
+            "[]".to_string()
         } else {
-            Err(format!(
-                "No API key is saved for the {} provider.",
-                provider.provider
-            ))
+            json!([value]).to_string()
         }
+    };
+    Vars::from([
+        ("api_key".to_string(), key.to_string()),
+        ("model".to_string(), provider.model.trim().to_string()),
+        ("endpoint".to_string(), provider.endpoint.trim().to_string()),
+        ("locales".to_string(), json_list(&language)),
+        ("locales_regional".to_string(), json_list(&locale)),
+        ("language".to_string(), language),
+        ("locale".to_string(), locale),
+        ("prompt".to_string(), profile.transcription_prompt.trim().to_string()),
+        ("system_prompt".to_string(), profile.system_prompt.clone()),
+        ("text".to_string(), text.to_string()),
+        (
+            "mime_type".to_string(),
+            mime_type.split(';').next().unwrap_or("").trim().to_string(),
+        ),
+        (
+            "file_name".to_string(),
+            format!("dictation.{}", audio_extension(mime_type)),
+        ),
+    ])
+}
+
+enum StageInput<'a> {
+    Audio { bytes: &'a [u8], mime_type: &'a str },
+    Text(&'a str),
+}
+
+struct StageOutcome {
+    status: u16,
+    body: String,
+    text: Option<String>,
+}
+
+fn parse_extra_value(value: &str) -> Value {
+    serde_json::from_str(value.trim()).unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+/// Sets `a.b.c` in a JSON object, creating parents as needed. A `null` value removes the key.
+fn set_json_path(body: &mut Value, path: &str, value: Value) {
+    let segments: Vec<&str> = path.split('.').filter(|segment| !segment.is_empty()).collect();
+    let Some((last, parents)) = segments.split_last() else {
+        return;
+    };
+    let mut cursor = body;
+    for segment in parents {
+        if !cursor.get(*segment).is_some_and(Value::is_object) {
+            cursor[*segment] = json!({});
+        }
+        cursor = &mut cursor[*segment];
+    }
+    if let Some(map) = cursor.as_object_mut() {
+        if value.is_null() {
+            map.remove(*last);
+        } else {
+            map.insert((*last).to_string(), value);
+        }
+    }
+}
+
+async fn send_openai_transcription(
+    client: &reqwest::Client,
+    provider: &ProviderSettings,
+    vars: &Vars,
+    key: &str,
+    bytes: &[u8],
+    mime_type: &str,
+) -> Result<adapters::HttpOutcome, String> {
+    let mut fields: Vec<(String, String)> = vec![
+        ("model".into(), provider.model.clone()),
+        ("response_format".into(), "json".into()),
+        ("language".into(), vars["language"].clone()),
+        ("prompt".into(), vars["prompt"].clone()),
+    ];
+    for param in provider
+        .extra_params
+        .iter()
+        .filter(|param| !param.key.trim().is_empty())
+    {
+        let name = param.key.trim();
+        fields.retain(|(existing, _)| existing != name);
+        if param.value.trim() != "null" {
+            fields.push((
+                name.to_string(),
+                adapters::render(&param.value, vars, adapters::Escape::Plain),
+            ));
+        }
+    }
+    let file = Part::bytes(bytes.to_vec())
+        .file_name(vars["file_name"].clone())
+        .mime_str(mime_type.split(';').next().unwrap_or("audio/webm"))
+        .map_err(|error| format!("Unsupported recording format: {error}"))?;
+    let mut form = Form::new().part("file", file);
+    for (name, value) in fields
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+    {
+        form = form.text(name, value);
+    }
+    let mut request = client.post(provider.endpoint.trim()).multipart(form);
+    if !key.is_empty() {
+        request = request.bearer_auth(key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach the transcription provider: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response.text().await.map_err(|error| {
+        format!("The transcription provider returned an unreadable response: {error}")
+    })?;
+    Ok(adapters::HttpOutcome { status, body })
+}
+
+async fn send_openai_chat(
+    client: &reqwest::Client,
+    provider: &ProviderSettings,
+    vars: &Vars,
+    key: &str,
+    system_prompt: &str,
+    text: &str,
+) -> Result<adapters::HttpOutcome, String> {
+    let mut body = json!({
+        "model": provider.model,
+        "temperature": 0.2,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": text }
+        ]
+    });
+    for param in provider
+        .extra_params
+        .iter()
+        .filter(|param| !param.key.trim().is_empty())
+    {
+        let value = parse_extra_value(&adapters::render(
+            &param.value,
+            vars,
+            adapters::Escape::Plain,
+        ));
+        set_json_path(&mut body, param.key.trim(), value);
+    }
+    let mut request = client.post(provider.endpoint.trim()).json(&body);
+    if !key.is_empty() {
+        request = request.bearer_auth(key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach the second-stage provider: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response.text().await.map_err(|error| {
+        format!("The second-stage provider returned an unreadable response: {error}")
+    })?;
+    Ok(adapters::HttpOutcome { status, body })
+}
+
+/// Runs one pipeline stage with `provider` and returns the raw response plus any extracted text.
+async fn run_stage(
+    client: &reqwest::Client,
+    profile: &DictationProfile,
+    stage: &str,
+    provider: &ProviderSettings,
+    input: StageInput<'_>,
+    supplied_key: Option<String>,
+) -> Result<StageOutcome, String> {
+    let key = key_for_request(profile, stage, provider, supplied_key)?;
+    let (text, mime_type) = match &input {
+        StageInput::Audio { mime_type, .. } => ("", *mime_type),
+        StageInput::Text(text) => (*text, ""),
+    };
+    let vars = stage_vars(profile, provider, &key, text, mime_type);
+    let outcome = if provider.uses_template() {
+        let audio = match &input {
+            StageInput::Audio { bytes, mime_type } => Some(adapters::Audio {
+                bytes,
+                mime_type,
+                file_name: vars["file_name"].clone(),
+            }),
+            StageInput::Text(_) => None,
+        };
+        adapters::send(client, &provider.template, &vars, audio).await?
+    } else {
+        match input {
+            StageInput::Audio { bytes, mime_type } => {
+                send_openai_transcription(client, provider, &vars, &key, bytes, mime_type).await?
+            }
+            StageInput::Text(text) => {
+                send_openai_chat(client, provider, &vars, &key, &profile.system_prompt, text)
+                    .await?
+            }
+        }
+    };
+    let path = if provider.uses_template() {
+        provider.template.response_path.as_str()
+    } else if stage == "transcription" {
+        "text"
+    } else {
+        "choices.0.message.content"
+    };
+    let text = outcome
+        .is_success()
+        .then(|| adapters::extract_text(&outcome.body, path))
+        .flatten();
+    Ok(StageOutcome {
+        status: outcome.status,
+        body: outcome.body,
+        text,
     })
+}
+
+fn stage_result(outcome: StageOutcome, label: &str, path: &str) -> Result<String, String> {
+    if !(200..300).contains(&outcome.status) {
+        return Err(format!(
+            "{label} failed ({}): {}",
+            outcome.status,
+            adapters::error_message(&outcome.body)
+        ));
+    }
+    outcome.text.ok_or_else(|| {
+        let hint = if path.is_empty() {
+            "Set a response path in the custom request settings.".to_string()
+        } else {
+            format!("Nothing was found at ‘{path}’.")
+        };
+        format!(
+            "{label} returned no text. {hint} Response: {}",
+            adapters::truncate(&outcome.body, 300)
+        )
+    })
+}
+
+fn response_path_label(provider: &ProviderSettings) -> &str {
+    if provider.uses_template() {
+        provider.template.response_path.trim()
+    } else {
+        ""
+    }
 }
 
 #[tauri::command]
@@ -619,58 +1009,76 @@ async fn list_models(
     if provider.models_endpoint.trim().is_empty() {
         return Err("Add a Models endpoint before refreshing the model list.".into());
     }
-    let key = if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
-        key
-    } else {
-        get_credential(&credential_account(&stage, &provider)).or_else(|_| {
-            if stage == "cleanup" && providers_can_share_key(&provider, &profile.transcription) {
-                get_credential(&credential_account("transcription", &profile.transcription))
-            } else {
-                Err(format!(
-                    "No API key is saved for the {} provider.",
-                    provider.provider
-                ))
-            }
-        })?
-    };
+    let key = key_for_request(profile, &stage, &provider, api_key)?;
+    let vars = stage_vars(profile, &provider, &key, "", "");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
-    let request = client.get(&provider.models_endpoint);
-    let response = if provider.provider == "gemini" {
-        request.header("x-goog-api-key", key).send().await
-    } else {
-        request.bearer_auth(key).send().await
+    let models_url = adapters::render(
+        provider.models_endpoint.trim(),
+        &vars,
+        adapters::Escape::Url,
+    );
+    let mut request = client.get(&models_url);
+    if provider.uses_template() {
+        // Reuse the template's authentication headers (x-api-key, Ocp-Apim-Subscription-Key, …).
+        for header in &provider.template.headers {
+            let value = adapters::render(&header.value, &vars, adapters::Escape::Plain);
+            let name = header.key.trim();
+            if name.is_empty()
+                || value.trim().is_empty()
+                || name.eq_ignore_ascii_case("content-type")
+            {
+                continue;
+            }
+            request = request.header(name, value.trim());
+        }
+    } else if provider.provider == "gemini" {
+        request = request.header("x-goog-api-key", key);
+    } else if !key.is_empty() {
+        request = request.bearer_auth(key);
     }
-    .map_err(|error| format!("Could not reach the models endpoint: {error}"))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach the models endpoint: {error}"))?;
     let status = response.status();
-    let body: serde_json::Value = response
-        .json()
+    let text = response
+        .text()
         .await
         .map_err(|error| format!("The models endpoint returned unreadable data: {error}"))?;
     if !status.is_success() {
-        let message = body
-            .pointer("/error/message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("The provider rejected the models request.");
-        return Err(format!("Could not list models ({status}): {message}"));
+        return Err(format!(
+            "Could not list models ({status}): {}",
+            adapters::error_message(&text)
+        ));
     }
+    let body: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("The models endpoint returned unreadable data: {error}"))?;
 
     let mut models: Vec<ModelOption> = Vec::new();
-    if let Some(data) = body.get("data").and_then(|value| value.as_array()) {
-        for item in data {
-            if let Some(id) = item.get("id").and_then(|value| value.as_str()) {
-                models.push(ModelOption {
-                    id: id.into(),
-                    name: item
-                        .get("display_name")
-                        .or_else(|| item.get("name"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(id)
-                        .into(),
-                });
-            }
+    // OpenAI/Anthropic use `data`, Deepgram uses `stt`, some servers return a bare array.
+    let arrays = [
+        body.as_array(),
+        body.get("data").and_then(|value| value.as_array()),
+        body.get("stt").and_then(|value| value.as_array()),
+    ];
+    for item in arrays.into_iter().flatten().flatten() {
+        let id = item
+            .get("id")
+            .or_else(|| item.get("name"))
+            .and_then(|value| value.as_str());
+        if let Some(id) = id {
+            models.push(ModelOption {
+                id: id.into(),
+                name: item
+                    .get("display_name")
+                    .or_else(|| item.get("name"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(id)
+                    .into(),
+            });
         }
     }
     if let Some(data) = body.get("models").and_then(|value| value.as_array()) {
@@ -695,7 +1103,7 @@ async fn list_models(
             .iter()
             .filter(|model| {
                 let id = model.id.to_ascii_lowercase();
-                id.contains("whisper") || id.contains("transcrib")
+                id.contains("whisper") || id.contains("transcrib") || id.contains("nova")
             })
             .map(|model| ModelOption {
                 id: model.id.clone(),
@@ -721,92 +1129,11 @@ fn audio_extension(mime_type: &str) -> &'static str {
     }
 }
 
-async fn request_transcription(
-    client: &reqwest::Client,
-    audio: Vec<u8>,
-    mime_type: &str,
-    profile: &DictationProfile,
-) -> Result<String, String> {
-    let key = credential_for_profile(profile, "transcription", None)?;
-    let file = Part::bytes(audio)
-        .file_name(format!("dictation.{}", audio_extension(mime_type)))
-        .mime_str(mime_type.split(';').next().unwrap_or("audio/webm"))
-        .map_err(|error| format!("Unsupported recording format: {error}"))?;
-    let mut form = Form::new()
-        .part("file", file)
-        .text("model", profile.transcription.model.clone())
-        .text("response_format", "json");
-    if profile.language != "auto" && !profile.language.is_empty() {
-        form = form.text("language", profile.language.clone());
-    }
-    if !profile.transcription_prompt.trim().is_empty() {
-        form = form.text("prompt", profile.transcription_prompt.clone());
-    }
-    let response = client
-        .post(&profile.transcription.endpoint)
-        .bearer_auth(key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|error| format!("Could not reach the transcription provider: {error}"))?;
-    let status = response.status();
-    let body: serde_json::Value = response.json().await.map_err(|error| {
-        format!("The transcription provider returned an unreadable response: {error}")
-    })?;
-    if !status.is_success() {
-        let message = body
-            .pointer("/error/message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Unknown provider error");
-        return Err(format!("Transcription failed ({status}): {message}"));
-    }
-    body.get("text")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "The transcription provider returned no text.".to_string())
-}
-
-async fn request_cleanup(
-    client: &reqwest::Client,
-    text: &str,
-    profile: &DictationProfile,
-) -> Result<String, String> {
-    let key = credential_for_profile(profile, "cleanup", None)?;
-    let response = client
-        .post(&profile.cleanup.endpoint)
-        .bearer_auth(key)
-        .json(&json!({
-            "model": profile.cleanup.model,
-            "temperature": 0.2,
-            "messages": [
-                { "role": "system", "content": profile.system_prompt },
-                { "role": "user", "content": text }
-            ]
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("Could not reach the second-stage provider: {error}"))?;
-    let status = response.status();
-    let body: serde_json::Value = response.json().await.map_err(|error| {
-        format!("The second-stage provider returned an unreadable response: {error}")
-    })?;
-    if !status.is_success() {
-        let message = body
-            .pointer("/error/message")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Unknown provider error");
-        return Err(format!(
-            "Second-stage processing failed ({status}): {message}"
-        ));
-    }
-    body.pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "The second-stage provider returned no text.".to_string())
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -824,24 +1151,124 @@ async fn transcribe_audio(
         .lock()
         .map_err(|_| "Settings are busy".to_string())?
         .clone();
+    if let Ok(mut last) = state.last_audio.lock() {
+        *last = Some((audio.clone(), mime_type.clone()));
+    }
     let profile = settings
         .profiles
         .iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "That dictation mode no longer exists.".to_string())?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let raw_text = request_transcription(&client, audio, &mime_type, profile).await?;
+    let client = http_client()?;
+    let input = StageInput::Audio {
+        bytes: &audio,
+        mime_type: &mime_type,
+    };
+    let outcome = run_stage(
+        &client,
+        profile,
+        "transcription",
+        &profile.transcription,
+        input,
+        None,
+    )
+    .await?;
+    let raw_text = stage_result(
+        outcome,
+        "Transcription",
+        response_path_label(&profile.transcription),
+    )?;
     let final_text = if profile.cleanup_enabled {
-        request_cleanup(&client, &raw_text, profile).await?
+        let outcome = run_stage(
+            &client,
+            profile,
+            "cleanup",
+            &profile.cleanup,
+            StageInput::Text(&raw_text),
+            None,
+        )
+        .await?;
+        stage_result(
+            outcome,
+            "Second-stage processing",
+            response_path_label(&profile.cleanup),
+        )?
     } else {
         raw_text.clone()
     };
     Ok(TranscriptionResult {
         raw_text,
         final_text,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTestResult {
+    ok: bool,
+    status: u16,
+    text: String,
+    raw: String,
+    input: String,
+}
+
+const TEST_CLEANUP_TEXT: &str =
+    "um so this is uh a quick test of the the second stage model you know just checking it works";
+
+/// Runs one stage with unsaved provider settings so custom requests can be debugged from Settings.
+#[tauri::command]
+async fn test_provider(
+    state: State<'_, AppState>,
+    profile_id: String,
+    stage: String,
+    provider: ProviderSettings,
+    system_prompt: Option<String>,
+    api_key: Option<String>,
+) -> Result<ProviderTestResult, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "Settings are busy".to_string())?
+        .clone();
+    let mut profile = settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "That mode no longer exists.".to_string())?;
+    if let Some(prompt) = system_prompt {
+        profile.system_prompt = prompt;
+    }
+    let client = http_client()?;
+    let (outcome, input) = if stage == "transcription" {
+        let (audio, mime_type) = state
+            .last_audio
+            .lock()
+            .map_err(|_| "Recorder cache is busy".to_string())?
+            .clone()
+            .ok_or("Record one dictation first (it can fail) — the test re-sends your most recent recording.")?;
+        let input = format!(
+            "Most recent recording · {} KB · {mime_type}",
+            audio.len().div_ceil(1024)
+        );
+        let stage_input = StageInput::Audio {
+            bytes: &audio,
+            mime_type: &mime_type,
+        };
+        let outcome = run_stage(&client, &profile, &stage, &provider, stage_input, api_key).await?;
+        (outcome, input)
+    } else {
+        let input = StageInput::Text(TEST_CLEANUP_TEXT);
+        let outcome = run_stage(&client, &profile, &stage, &provider, input, api_key).await?;
+        (outcome, format!("Sample text: “{TEST_CLEANUP_TEXT}”"))
+    };
+    let ok = (200..300).contains(&outcome.status) && outcome.text.is_some();
+    Ok(ProviderTestResult {
+        ok,
+        status: outcome.status,
+        text: outcome.text.unwrap_or_default(),
+        raw: adapters::truncate(&outcome.body, 6_000),
+        input,
     })
 }
 
@@ -913,6 +1340,7 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(settings.clone()),
                 config_dir,
+                last_audio: Mutex::new(None),
             });
             if let Err(error) = register_shortcuts(&app.handle(), &settings) {
                 eprintln!("{error}");
@@ -945,8 +1373,11 @@ pub fn run() {
             save_settings,
             load_history,
             save_history,
+            save_failed_recording,
+            show_failed_recording,
             list_models,
             transcribe_audio,
+            test_provider,
             paste_text,
             set_overlay,
             start_overlay_drag
@@ -995,6 +1426,38 @@ mod tests {
         let settings = AppSettings::default();
         let shortcuts = parsed_shortcuts(&settings).expect("default shortcuts should parse");
         assert_eq!(shortcuts.len(), 3);
+    }
+
+    #[test]
+    fn settings_from_previous_versions_still_load() {
+        let saved = r#"{"provider":"groq","endpoint":"https://api.groq.com/openai/v1/audio/transcriptions","modelsEndpoint":"","model":"whisper-large-v3-turbo","apiKeySet":true}"#;
+        let provider: ProviderSettings = serde_json::from_str(saved).expect("old provider JSON parses");
+        assert_eq!(provider.format, "openai");
+        assert!(provider.extra_params.is_empty());
+        assert_eq!(provider.template.url, "{{endpoint}}");
+        assert!(!provider.force_wav);
+    }
+
+    #[test]
+    fn extra_params_nest_and_remove_fields() {
+        let mut body = json!({ "model": "m", "temperature": 0.2 });
+        set_json_path(&mut body, "temperature", parse_extra_value("null"));
+        set_json_path(&mut body, "reasoning.effort", parse_extra_value("low"));
+        set_json_path(&mut body, "max_tokens", parse_extra_value("800"));
+        assert_eq!(body, json!({ "model": "m", "reasoning": { "effort": "low" }, "max_tokens": 800 }));
+    }
+
+    #[test]
+    fn template_key_is_only_required_when_referenced() {
+        let mut provider = groq_transcription();
+        provider.provider = "custom".into();
+        provider.format = "template".into();
+        assert!(!provider_needs_key(&provider));
+        provider.template.headers.push(KeyValue {
+            key: "Authorization".into(),
+            value: "Bearer {{api_key}}".into(),
+        });
+        assert!(provider_needs_key(&provider));
     }
 
     #[test]

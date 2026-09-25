@@ -13,7 +13,10 @@ You can add, rename, duplicate by configuration, or delete modes. Every mode own
 - Global shortcuts for Raw and Polish dictation
 - Any number of user-created modes with independent global hotkeys
 - Per-mode pipelines: speech-to-text followed by an optional transformation model
-- Groq, Cerebras, Gemini, OpenAI, and custom OpenAI-compatible correction providers
+- Groq, Cerebras, Gemini, OpenAI, Anthropic, Azure OpenAI, and custom correction providers
+- Microsoft Azure Speech (MAI-Transcribe-2, LLM Speech, Fast Transcription) and Deepgram speech-to-text
+- Custom request templates for APIs that are not OpenAI-compatible, with cURL import and a live test panel
+- Extra request parameters for OpenAI-compatible providers (reasoning effort, temperature, timestamps…)
 - Provider model discovery through editable Models API endpoints
 - Automatically saved settings and API keys
 - Configurable global cancel hotkey that discards audio before any API request
@@ -47,6 +50,23 @@ Open **Settings → Modes**, select a mode, and add the keys for its pipeline. A
 Press the same shortcut again to finish recording. The transcript is pasted where the cursor was left.
 
 The global cancel shortcut defaults to `Ctrl/Cmd + Shift + Escape`. It stops and discards the active recording without calling the transcription or correction providers. It can be changed or removed under **Settings → Modes**.
+
+## Custom requests (any API)
+
+Every pipeline stage has a **Request format** switch:
+
+- **OpenAI-compatible** sends the standard multipart transcription or chat-completions request. *Extra request parameters* are merged in: form fields for speech (`temperature = 0`), JSON fields for chat (`reasoning_effort = low`, `reasoning.effort` nests). A value of `null` drops a default field, such as `temperature`.
+- **Custom request** describes the whole HTTP call: method, URL, headers, body (multipart, JSON, raw audio, URL-encoded, or text), and the **response path** where the text lives (`combinedPhrases.0.text`, `choices[0].message.content`, `/content/0/text`, or `output.*.content.*.text` to join matches). Leave the path empty to auto-detect common shapes.
+
+**Import from cURL** turns the example in an API's docs into a template. The audio file becomes `{{audio}}`, the model becomes `{{model}}`, and a key found in the command is moved to the system keychain and replaced with `{{api_key}}`. For cleanup models, the sample message becomes `{{text}}` and a system instruction is added as `{{system_prompt}}`.
+
+Placeholders are escaped for where they appear (URL, JSON, header); `{{raw:name}}` inserts a value untouched. Empty form fields and headers are skipped, so `{{language}}` disappears on auto-detect. The full list is under *Placeholders you can use* in the editor.
+
+**Test this stage** re-sends your most recent recording (or a sample transcript for the second stage) with the unsaved settings and shows the HTTP status, the extracted text, and the raw response.
+
+### Microsoft MAI-Transcribe
+
+Choose **Microsoft Azure Speech (MAI-Transcribe)** as the speech provider, replace `YOUR-RESOURCE` in the endpoint with your Speech resource name (from a region that serves MAI-Transcribe, such as `eastus`), and paste the resource key. The *Start from a template* menu switches between MAI **clean** (Microsoft removes fillers), **verbatim** (raw), **clean + vocabulary** (phrase list), **LLM Speech** (prompt-tuned), and **classic Fast Transcription**, keeping your resource name. MAI accepts WAV, MP3, and FLAC, so *Always send WAV audio* is on by default for this provider.
 
 ## Silence trimming
 
@@ -87,5 +107,6 @@ Audio is sent only to the configured speech provider. In Polish mode, the result
 ## Current MVP boundaries
 
 - The app records a complete utterance, then transcribes it; it does not stream partial text live.
-- Custom providers must expose OpenAI-compatible transcription and chat-completions responses. Their model-list endpoint should return either an OpenAI-style `data` array or a Gemini-style `models` array.
+- Custom requests cover one HTTP call per stage. APIs that need polling (batch transcription jobs), streaming responses, or request signing (AWS SigV4) are not supported.
+- Model-list endpoints should return an OpenAI-style `data` array, a Gemini-style `models` array, a Deepgram-style `stt` array, or a bare array.
 - Hotkeys are recorded directly in the mode editor and can be cleared without deleting the mode.

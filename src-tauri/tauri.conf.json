@@ -21,16 +21,18 @@
         "center": true,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true
+        "decorations": true,
+        "theme": "Dark",
+        "backgroundColor": "#0d0d0c"
       },
       {
         "title": "HushType recording",
         "label": "overlay",
         "url": "index.html?overlay=1",
-        "width": 340,
-        "height": 72,
-        "minWidth": 340,
-        "minHeight": 72,
+        "width": 96,
+        "height": 52,
+        "minWidth": 96,
+        "minHeight": 52,
         "visible": false,
         "resizable": false,
         "fullscreen": false,
