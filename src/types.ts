@@ -1,4 +1,6 @@
-export type View = "mode" | "history" | "general";
+import defaultSystemPrompt from "./default-system-prompt.txt?raw";
+
+export type View ="mode" | "history" | "general";
 export type ProviderId =
   | "groq"
   | "cerebras"
@@ -102,8 +104,7 @@ export interface ProviderTestResult {
   input: string;
 }
 
-export const DEFAULT_SYSTEM_PROMPT =
-  "Clean up this dictated text. Remove filler words and false starts, fix punctuation and capitalization, preserve the speaker's meaning and tone, and return only the edited text.";
+export const DEFAULT_SYSTEM_PROMPT = defaultSystemPrompt.trim();
 
 export const PLACEHOLDERS: Array<{ name: string; description: string; stage?: PipelineStage }> = [
   { name: "api_key", description: "The key saved for this provider" },
