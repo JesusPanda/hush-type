@@ -35,8 +35,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-microphone-${{ github.ref }}
-  cancel-in-progress: true
+  # Scope PR cancellation to the PR number, even when GitHub resolves its ref to main.
+  group: macos-microphone-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-and-verify:
