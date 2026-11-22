@@ -44,6 +44,7 @@ import {
   SUGGESTED_MODELS,
   TEMPLATE_PRESETS,
   applyTemplatePreset,
+  isNativeGeminiSpeech,
   normalizeSettings,
   pigmentFor,
   providerDefaults,
@@ -57,6 +58,7 @@ import {
   type ProviderSettings,
   type RecordingState,
   type RequestFormat,
+  type TranscribeMode,
   type View,
 } from "./types";
 
@@ -500,10 +502,11 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
     else onChange({ ...provider, format });
   };
   const options: ProviderId[] = stage === "transcription"
-    ? ["groq", "openai", "azure-speech", "azure-openai", "deepgram", "custom"]
+    ? ["groq", "gemini", "openai", "azure-speech", "azure-openai", "deepgram", "custom"]
     : ["cerebras", "gemini", "groq", "openai", "anthropic", "azure-openai", "custom"];
   const suggested = (SUGGESTED_MODELS[provider.provider] ?? []).filter((item) => !models.some((model) => model.id === item.id));
   const listId = `models-${profile.id}-${stage}`;
+  const geminiSpeech = stage === "transcription" && provider.provider === "gemini";
   return (
     <div className="provider-editor">
       <div className="form-grid">
@@ -513,12 +516,13 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
         <div className="span-two format-switch" role="radiogroup" aria-label="Request format">
           <span>Request format</span>
           <div>
-            <button type="button" role="radio" aria-checked={provider.format === "openai"} className={provider.format === "openai" ? "active" : ""} onClick={() => changeFormat("openai")}>OpenAI-compatible</button>
+            <button type="button" role="radio" aria-checked={provider.format === "openai"} className={provider.format === "openai" ? "active" : ""} onClick={() => changeFormat("openai")}>{geminiSpeech ? "Gemini Transcribe" : "OpenAI-compatible"}</button>
             <button type="button" role="radio" aria-checked={provider.format === "template"} className={provider.format === "template" ? "active" : ""} onClick={() => changeFormat("template")}>Custom request</button>
           </div>
         </div>
         <label className="span-two"><span>API endpoint {provider.endpoint.includes("YOUR-RESOURCE") && <small className="warn">Replace YOUR-RESOURCE with your resource name</small>}</span><input className="code" spellCheck={false} value={provider.endpoint} onChange={(event) => onChange({ ...provider, endpoint: event.target.value })} /></label>
         <label className="span-two"><span>Models endpoint <small>Optional. Used to list available models.</small></span><input className="code" spellCheck={false} value={provider.modelsEndpoint} onChange={(event) => onChange({ ...provider, modelsEndpoint: event.target.value })} /></label>
+        {isNativeGeminiSpeech(provider, stage) && <GeminiModePicker value={provider.transcribeMode} onChange={(transcribeMode) => onChange({ ...provider, transcribeMode })} />}
         {stage === "transcription" && <label className="span-two setting-row"><div><strong>Always send WAV audio</strong><small>Needed by APIs that reject WebM (Microsoft MAI accepts WAV, MP3, FLAC). Silence trimming already sends WAV.</small></div><input type="checkbox" checked={provider.forceWav} onChange={(event) => onChange({ ...provider, forceWav: event.target.checked })} /></label>}
       </div>
       {modelsState === "error" && <div className="models-message error">{modelsError}</div>}
@@ -526,6 +530,34 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
         ? <TemplateEditor provider={provider} stage={stage} onChange={onChange} onDetectedKey={setApiKey} />
         : <ExtraParamsEditor provider={provider} stage={stage} onChange={onChange} />}
       <TestPanel profileId={profile.id} stage={stage} provider={provider} systemPrompt={profile.systemPrompt} />
+    </div>
+  );
+}
+
+const GEMINI_MODES: Array<{ id: TranscribeMode; label: string; description: string }> = [
+  {
+    id: "smart",
+    label: "Smart",
+    description: "Removes fillers and false starts, keeps only your final self-correction, formats lists, numbers, dates, and money, and applies spoken edits such as “delete the last sentence” or “make that a bulleted list”.",
+  },
+  {
+    id: "verbatim",
+    label: "Direct",
+    description: "Verbatim: an exact word-for-word transcript. Keeps every “um”, repetition, and false start, and treats spoken edits as words.",
+  },
+];
+
+/** Gemini 3.5 Transcribe's two modes. */
+function GeminiModePicker({ value, onChange }: { value: TranscribeMode; onChange: (mode: TranscribeMode) => void }) {
+  const active = GEMINI_MODES.find((mode) => mode.id === value) ?? GEMINI_MODES[0];
+  return (
+    <div className="span-two format-switch" role="radiogroup" aria-label="Transcription mode">
+      <span>Transcription mode <small>{active.description}</small></span>
+      <div>
+        {GEMINI_MODES.map((mode) => (
+          <button type="button" role="radio" key={mode.id} aria-checked={mode.id === value} className={mode.id === value ? "active" : ""} onClick={() => onChange(mode.id)}>{mode.label}</button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -596,7 +628,9 @@ function ModeView({ settings, saveState, saveError, onSettings, onSaveKey, onDel
       <div className="wire">
         <Stage id="stage-speech" title="Speech to text" description="Turns the recording into text.">
           <ProviderEditor profile={profile} stage="transcription" onChange={(transcription) => updateProfile({ transcription })} onSaveKey={onSaveKey} />
-          <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint. Sent as the prompt field, or as {"{{prompt}}"} in custom requests.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>
+          {isNativeGeminiSpeech(profile.transcription, "transcription")
+            ? <label className="field-block"><span>Custom vocabulary <small>Names and terms to spell exactly, separated by commas or new lines. Sent as custom_vocabulary: up to 1,000 terms, best under 100.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="T3 Code, subagents, Claude Code, Tauri" /></label>
+            : <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint. Sent as the prompt field, or as {"{{prompt}}"} in custom requests.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>}
         </Stage>
 
         <Stage

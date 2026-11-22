@@ -14,7 +14,7 @@ You can add, rename, duplicate by configuration, or delete modes. Every mode own
 - Any number of user-created modes with independent global hotkeys
 - Per-mode pipelines: speech-to-text followed by an optional transformation model
 - Groq, Cerebras, Gemini, OpenAI, Anthropic, Azure OpenAI, and custom correction providers
-- Microsoft Azure Speech (MAI-Transcribe-2, LLM Speech, Fast Transcription) and Deepgram speech-to-text
+- Google Gemini 3.5 Transcribe (Smart and Direct modes, custom vocabulary), Microsoft Azure Speech (MAI-Transcribe-2, LLM Speech, Fast Transcription), and Deepgram speech-to-text
 - Custom request templates for APIs that are not OpenAI-compatible, with cURL import and a live test panel
 - Extra request parameters for OpenAI-compatible providers (reasoning effort, temperature, timestamps…)
 - Provider model discovery through editable Models API endpoints
@@ -63,6 +63,15 @@ Every pipeline stage has a **Request format** switch:
 Placeholders are escaped for where they appear (URL, JSON, header); `{{raw:name}}` inserts a value untouched. Empty form fields and headers are skipped, so `{{language}}` disappears on auto-detect. The full list is under *Placeholders you can use* in the editor.
 
 **Test this stage** re-sends your most recent recording (or a sample transcript for the second stage) with the unsaved settings and shows the HTTP status, the extracted text, and the raw response.
+
+### Google Gemini 3.5 Transcribe
+
+Choose **Google Gemini** as the speech provider and paste a Gemini API key. HushType calls the Interactions API (`/v1beta/interactions`) with `gemini-3.5-transcribe` and offers both of its modes:
+
+- **Smart** (default) removes fillers and false starts, keeps only your final self-correction, formats lists, numbers, dates, and currency, and applies spoken edits such as "delete the last sentence" or "make that a bulleted list".
+- **Direct** is verbatim: an exact word-for-word transcript.
+
+The mode's speech prompt becomes **Custom vocabulary**: list names and terms separated by commas or new lines and they are sent as `custom_vocabulary` (up to 1,000 terms; Google recommends about 100). A fixed language is sent as `language_codes`; auto-detect sends none.
 
 ### Microsoft MAI-Transcribe
 

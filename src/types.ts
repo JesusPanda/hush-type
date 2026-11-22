@@ -45,7 +45,15 @@ export interface ProviderSettings {
   template: RequestTemplate;
   /** Always upload 16 kHz WAV, for APIs that reject WebM. */
   forceWav: boolean;
+  /** Gemini transcription: "smart" cleans up, formats, and applies spoken edits; "verbatim" is word for word. */
+  transcribeMode: TranscribeMode;
 }
+
+export type TranscribeMode = "smart" | "verbatim";
+
+/** True when the speech stage uses HushType's built-in Gemini 3.5 Transcribe request. */
+export const isNativeGeminiSpeech = (value: ProviderSettings, stage: PipelineStage) =>
+  stage === "transcription" && value.provider === "gemini" && value.format === "openai";
 
 export interface DictationProfile {
   id: string;
@@ -142,6 +150,7 @@ const provider = (settings: Partial<ProviderSettings> & Pick<ProviderSettings, "
   extraParams: [],
   template: emptyTemplate(),
   forceWav: false,
+  transcribeMode: "smart",
   ...settings,
 });
 
@@ -157,6 +166,7 @@ export const normalizeProvider = (value: Partial<ProviderSettings> & Pick<Provid
   extraParams: value.extraParams ?? [],
   template: { ...emptyTemplate(), ...(value.template ?? {}) },
   forceWav: value.forceWav ?? false,
+  transcribeMode: value.transcribeMode === "verbatim" ? "verbatim" : "smart",
 });
 
 /** Each mode wears one pigment across the app and the floating pop-up. */
@@ -306,6 +316,13 @@ export const PROVIDER_DEFAULTS: Record<ProviderId, { transcription?: ProviderSet
     }),
   },
   gemini: {
+    transcription: provider({
+      provider: "gemini",
+      endpoint: "https://generativelanguage.googleapis.com/v1beta/interactions",
+      modelsEndpoint: "https://generativelanguage.googleapis.com/v1beta/models",
+      model: "gemini-3.5-transcribe",
+      transcribeMode: "smart",
+    }),
     cleanup: provider({
       provider: "gemini",
       endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -385,8 +402,7 @@ export const providerDefaults = (id: ProviderId, stage: PipelineStage) => {
 };
 
 /** Models offered in the picker when a provider has no models endpoint. */
-export const SUGGESTED_MODELS: Partial<Record<ProviderId, ModelOption[]>> = {
-  "azure-speech": [
+export const SUGGESTED_MODELS: Partial<Record<ProviderId, ModelOption[]>> = {  "azure-speech": [
     { id: "MAI-Transcribe-2", name: "MAI-Transcribe-2 · 60 languages" },
     { id: "MAI-Transcribe-1.5", name: "MAI-Transcribe-1.5" },
   ],
