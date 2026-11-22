@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, CircleAlert, Mic, Sparkles, X } from "lucide-react";
+import { Capsule } from "./components/Capsule";
 import { onOverlayState, requestOverlayCancel, startOverlayDrag, type OverlayPayload } from "./lib/bridge";
 
 const initial: OverlayPayload = {
@@ -26,26 +26,19 @@ export default function OverlayApp() {
     return () => { unlisten(); document.documentElement.classList.remove("overlay-document"); };
   }, []);
 
-  const icon = payload.state === "success"
-    ? <Check size={15} strokeWidth={2.4} />
-    : payload.state === "error"
-      ? <CircleAlert size={15} strokeWidth={2.2} />
-      : payload.cleanupEnabled ? <Sparkles size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />;
-
   return (
     <div className="overlay-stage">
-      <div
-        className={`overlay-pill state-${payload.state}`}
+      <Capsule
+        state={payload.state}
+        color={payload.color}
+        title={`${payload.profileName}: ${stateLabel[payload.state]}. Drag to move.`}
+        onCancel={() => void requestOverlayCancel()}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest("button")) {
             void startOverlayDrag();
           }
         }}
-        title={`${payload.profileName} · ${stateLabel[payload.state]} — drag to move`}
-      >
-        <div className="overlay-icon">{icon}</div>
-        <button className="overlay-cancel" onClick={() => void requestOverlayCancel()} title="Cancel and discard" aria-label="Cancel and discard"><X size={13} strokeWidth={2.4} /></button>
-      </div>
+      />
     </div>
   );
 }

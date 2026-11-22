@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Check,
   ChevronDown,
@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { ExtraParamsEditor, TemplateEditor, TestPanel } from "./components/RequestEditor";
+import { Capsule } from "./components/Capsule";
 import { useRecorder } from "./hooks/useRecorder";
 import { useMicrophoneLevel } from "./hooks/useMicrophoneLevel";
 import {
@@ -39,11 +40,14 @@ import {
 import {
   DEFAULT_SETTINGS,
   DEFAULT_SYSTEM_PROMPT,
+  MODE_PIGMENTS,
   SUGGESTED_MODELS,
   TEMPLATE_PRESETS,
   applyTemplatePreset,
   normalizeSettings,
+  pigmentFor,
   providerDefaults,
+  unusedPigment,
   type AppSettings,
   type DictationProfile,
   type HistoryItem,
@@ -58,20 +62,20 @@ import {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
-const timeAgo = (timestamp: number) => {
-  const seconds = Math.max(1, Math.round((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "Just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(timestamp);
-};
+const isMac = navigator.platform.includes("Mac");
 
 const formatShortcut = (shortcut: string) =>
   shortcut
-    .replace("CommandOrControl", navigator.platform.includes("Mac") ? "⌘" : "Ctrl")
+    .replace("CommandOrControl", isMac ? "⌘" : "Ctrl")
     .replaceAll("+", " + ");
+
+const keyLabel = (key: string) => ({
+  CommandOrControl: isMac ? "⌘" : "Ctrl",
+  Shift: isMac ? "⇧" : "Shift",
+  Alt: isMac ? "⌥" : "Alt",
+  Escape: "Esc",
+  Space: "Space",
+})[key] ?? key;
 
 const normalizeHistory = (item: HistoryItem): HistoryItem => ({
   ...item,
@@ -82,19 +86,32 @@ const normalizeHistory = (item: HistoryItem): HistoryItem => ({
 
 const countWords = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 
+/** Sets the mode's pigment as a CSS variable for everything inside. */
+const pig = (hex: string) => ({ "--pig": hex }) as CSSProperties;
+
+const pigmentOf = (profiles: DictationProfile[], id: string) => {
+  const index = profiles.findIndex((item) => item.id === id);
+  return index < 0 ? undefined : pigmentFor(profiles[index], index);
+};
+
 function ModeIcon({ profile, size = 15 }: { profile: Pick<DictationProfile, "cleanupEnabled">; size?: number }) {
   return profile.cleanupEnabled ? <Sparkles size={size} strokeWidth={1.9} /> : <Mic size={size} strokeWidth={1.9} />;
 }
 
 function Logo() {
-  return <div className="logo-mark" aria-label="HushType"><i /><i /><i /><i /><i /></div>;
+  return <span className="logo-mark" aria-hidden="true">{MODE_PIGMENTS.slice(0, 4).map((item) => <i key={item.id} style={{ background: item.hex }} />)}<b /></span>;
+}
+
+function Keys({ shortcut, empty = "No hotkey" }: { shortcut: string; empty?: string }) {
+  if (!shortcut) return <span className="keys empty">{empty}</span>;
+  return <span className="keys" aria-label={formatShortcut(shortcut)}>{shortcut.split("+").map((key, index) => <kbd key={`${key}-${index}`}>{keyLabel(key)}</kbd>)}</span>;
 }
 
 function SaveStatus({ state, error }: { state: SaveState; error: string }) {
   return (
-    <div className={`save-status ${state}`} title={state === "error" ? error : undefined}>
+    <div className={`save-status ${state}`} title={state === "error" ? error : undefined} role="status">
       {state === "saving" && <span className="spinner small" />}
-      {state === "saved" && <Check size={13} />}
+      {state === "saved" && <Check size={13} strokeWidth={2.4} />}
       {state === "error" && <CircleAlert size={13} />}
       <span>{state === "error" ? error || "Couldn't save" : state === "saving" ? "Saving…" : state === "saved" ? "Saved" : "Autosave on"}</span>
     </div>
@@ -111,6 +128,7 @@ interface ErrorEntry {
 }
 
 const clockTime = (timestamp: number) => new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(timestamp);
+const shortTime = (timestamp: number) => new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(timestamp);
 
 function RecordingButton({ path }: { path?: string }) {
   if (!path) return null;
@@ -133,7 +151,10 @@ function ErrorPopover({ current, earlier, onRetry, onClose, onClear }: { current
     <div className="error-popover" role="alertdialog" aria-label="Dictation errors">
       <header>
         <span className="error-popover-icon"><CircleAlert size={15} /></span>
-        <div><strong>{current ? "Couldn't finish" : "Recent errors"}</strong><small>{current ? `${current.profileName} · ${clockTime(current.at)}` : `${earlier.length} this session`}</small></div>
+        <div>
+          <strong>{current ? "Couldn't finish" : "Recent errors"}</strong>
+          <small>{current ? <><span>{current.profileName}</span><time>{clockTime(current.at)}</time></> : `${earlier.length} this session`}</small>
+        </div>
         <button className="ghost-icon" onClick={onClose} title="Close" aria-label="Close"><X size={15} /></button>
       </header>
       {current && <>
@@ -160,6 +181,8 @@ function ErrorPopover({ current, earlier, onRetry, onClose, onClear }: { current
 interface DictateControlProps {
   state: RecordingState;
   profile: DictationProfile;
+  color: string;
+  levels: number[];
   error: string;
   errorLog: ErrorEntry[];
   logOpen: boolean;
@@ -170,7 +193,7 @@ interface DictateControlProps {
   onClearLog: () => void;
 }
 
-function DictateControl({ state, profile, error, errorLog, logOpen, onToggle, onCancel, onOpenLog, onDismissError, onClearLog }: DictateControlProps) {
+function DictateControl({ state, profile, color, levels, error, errorLog, logOpen, onToggle, onCancel, onOpenLog, onDismissError, onClearLog }: DictateControlProps) {
   const title: Record<RecordingState, string> = {
     idle: "Dictate",
     recording: "Listening",
@@ -178,30 +201,26 @@ function DictateControl({ state, profile, error, errorLog, logOpen, onToggle, on
     success: "Done",
     error: "Couldn't finish",
   };
-  const detail = state === "idle"
-    ? profile.name
-    : state === "recording"
-      ? "Click to finish"
-      : state === "error"
-        ? error || "Something went wrong"
-        : profile.name;
   const icon = state === "recording"
     ? <Square size={11} fill="currentColor" strokeWidth={0} />
     : state === "processing"
       ? <span className="spinner small" />
       : state === "success"
-        ? <Check size={15} strokeWidth={2.4} />
+        ? <Check size={15} strokeWidth={2.6} />
         : state === "error"
           ? <CircleAlert size={15} />
           : <ModeIcon profile={profile} />;
+  const detail = state === "recording"
+    ? <span className="dictate-wave" aria-label="Click to finish">{levels.map((level, index) => <i key={index} style={{ transform: `scaleY(${Math.max(0.12, Math.min(1, level))})` }} />)}</span>
+    : <small>{state === "error" ? error || "Something went wrong" : profile.name}</small>;
   const current = state === "error" ? errorLog[0] : undefined;
   return (
-    <div className="dictate-wrap">
+    <div className="dictate-wrap" style={pig(color)}>
       {logOpen && (current || errorLog.length > 0) && <ErrorPopover current={current} earlier={current ? errorLog.slice(1) : errorLog} onRetry={onToggle} onClose={onDismissError} onClear={onClearLog} />}
       <div className={`dictate-control state-${state}`}>
-        <button className="dictate-main" onClick={state === "error" ? onOpenLog : onToggle} disabled={state === "processing"}>
+        <button className="dictate-main" onClick={state === "error" ? onOpenLog : onToggle} disabled={state === "processing"} title={state === "recording" ? "Click to finish" : undefined}>
           <span className="dictate-icon">{icon}</span>
-          <span className="dictate-copy"><strong>{title[state]}</strong><small>{detail}</small></span>
+          <span className="dictate-copy"><strong>{title[state]}</strong>{detail}</span>
         </button>
         {state === "idle" && errorLog.length > 0 && <button className="dictate-log" onClick={logOpen ? onDismissError : onOpenLog} title="Recent errors" aria-label="Recent errors"><CircleAlert size={13} />{errorLog.length}</button>}
         {state !== "idle" && state !== "success" && <button className="dictate-cancel" onClick={onCancel} title="Cancel and discard" aria-label="Cancel and discard"><X size={14} strokeWidth={2.2} /></button>}
@@ -225,61 +244,92 @@ function Sidebar({ view, settings, historyCount, onView, onSelectMode, onAddMode
   return (
     <aside className="sidebar">
       <div className="brand"><Logo /><span>HushType</span></div>
-      <div className="nav-group">
+      <div className="nav-group modes-group">
         <div className="nav-label"><span>Modes</span><button onClick={onAddMode} title="New mode" aria-label="New mode"><Plus size={14} /></button></div>
         <div className="mode-nav">
-          {settings.profiles.map((item) => {
+          {settings.profiles.map((item, index) => {
             const active = view === "mode" && item.id === settings.activeProfileId;
             return (
-              <button className={`nav-item mode-item ${active ? "active" : ""}`} onClick={() => onSelectMode(item.id)} key={item.id}>
-                <span className="nav-icon"><ModeIcon profile={item} /></span>
-                <span className="nav-text"><strong>{item.name || "Untitled mode"}</strong><small>{item.shortcut ? formatShortcut(item.shortcut) : "No hotkey"}</small></span>
+              <button className={`mode-tab ${active ? "active" : ""}`} style={pig(pigmentFor(item, index).hex)} onClick={() => onSelectMode(item.id)} key={item.id} aria-current={active ? "page" : undefined}>
+                <span className="mode-tab-ink" aria-hidden="true" />
+                <span className="mode-tab-text">
+                  <strong>{item.name || "Untitled mode"}{item.cleanupEnabled && <Sparkles size={11} strokeWidth={2.2} aria-label="Runs a second model" />}</strong>
+                  <Keys shortcut={item.shortcut} />
+                </span>
                 {!item.transcription.apiKeySet && <span className="needs-key" title="Add an API key to use this mode" />}
-                {settings.profiles.length > 1 && <i role="button" tabIndex={0} title="Delete mode" onClick={(event) => { event.stopPropagation(); onDeleteMode(item.id); }}><Trash2 size={13} /></i>}
+                {settings.profiles.length > 1 && <i role="button" tabIndex={0} title="Delete mode" aria-label={`Delete ${item.name || "mode"}`} onClick={(event) => { event.stopPropagation(); onDeleteMode(item.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); onDeleteMode(item.id); } }}><Trash2 size={13} /></i>}
               </button>
             );
           })}
         </div>
       </div>
       <div className="nav-group">
-        <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => onView("history")}><span className="nav-icon"><History size={15} strokeWidth={1.9} /></span><span className="nav-text"><strong>History</strong></span>{historyCount > 0 && <span className="nav-count">{historyCount}</span>}</button>
-        <button className={`nav-item ${view === "general" ? "active" : ""}`} onClick={() => onView("general")}><span className="nav-icon"><SlidersHorizontal size={15} strokeWidth={1.9} /></span><span className="nav-text"><strong>General</strong></span></button>
+        <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => onView("history")} aria-current={view === "history" ? "page" : undefined}><History size={15} strokeWidth={1.9} /><span>History</span>{historyCount > 0 && <span className="nav-count">{historyCount}</span>}</button>
+        <button className={`nav-item ${view === "general" ? "active" : ""}`} onClick={() => onView("general")} aria-current={view === "general" ? "page" : undefined}><SlidersHorizontal size={15} strokeWidth={1.9} /><span>General</span></button>
       </div>
       <div className="sidebar-footer"><DictateControl {...dictate} /></div>
     </aside>
   );
 }
 
-function HistoryCard({ item, onCopy, onDelete }: { item: HistoryItem; onCopy: () => void; onDelete: () => void }) {
+function HistoryEntry({ item, color, onCopy, onDelete }: { item: HistoryItem; color?: string; onCopy: () => void; onDelete: () => void }) {
   const [copied, setCopied] = useState(false);
   const copy = () => { onCopy(); setCopied(true); window.setTimeout(() => setCopied(false), 1200); };
   return (
-    <article className="history-card">
-      <div className={`history-mode ${item.usedCleanup ? "polish" : ""}`}>{item.usedCleanup ? <Sparkles size={13} /> : <Mic size={13} />}</div>
-      <div className="history-body"><p>{item.finalText}</p><div className="history-meta"><span>{item.profileName}</span><i /><span>{timeAgo(item.createdAt)}</span><i /><span>{Math.max(1, Math.round(item.durationMs / 1000))}s</span></div></div>
-      <div className="card-actions"><button onClick={copy} title="Copy">{copied ? <Check size={15} /> : <Copy size={15} />}</button><button className="danger" onClick={onDelete} title="Delete"><Trash2 size={15} /></button></div>
-    </article>
+    <li className={`entry ${color ? "" : "orphan"}`} style={color ? pig(color) : undefined}>
+      <time dateTime={new Date(item.createdAt).toISOString()} title={new Date(item.createdAt).toLocaleString()}>{shortTime(item.createdAt)}</time>
+      <div className="entry-body">
+        <p>{item.finalText}</p>
+        <div className="entry-meta">
+          <span className="entry-mode">{item.usedCleanup ? <Sparkles size={11} strokeWidth={2.2} /> : <Mic size={11} strokeWidth={2.2} />}{item.profileName}</span>
+          <span>{Math.max(1, Math.round(item.durationMs / 1000))} s of audio</span>
+        </div>
+      </div>
+      <div className="entry-actions"><button onClick={copy} title="Copy" aria-label="Copy">{copied ? <Check size={15} /> : <Copy size={15} />}</button><button className="danger" onClick={onDelete} title="Delete" aria-label="Delete"><Trash2 size={15} /></button></div>
+    </li>
   );
 }
 
 function EmptyHistory({ searching, onStart }: { searching: boolean; onStart: () => void }) {
   if (searching) return <div className="empty-history"><h3>No matches</h3><p>Try a different word or mode name.</p></div>;
-  return <div className="empty-history"><div className="empty-icon"><Mic size={20} /></div><h3>Nothing here yet</h3><p>Every dictation stays on this device so you can copy or reuse it later.</p><button className="primary-button" onClick={onStart}><Mic size={15} /> Start dictating</button></div>;
+  return <div className="empty-history"><h3>Nothing here yet</h3><p>Every dictation stays on this device so you can copy or reuse it later.</p><button className="primary-button" onClick={onStart}><Mic size={15} /> Start dictating</button></div>;
 }
 
-function HistoryView({ history, onCopy, onDelete, onStart }: { history: HistoryItem[]; onCopy: (text: string) => void; onDelete: (id: string) => void; onStart: () => void }) {
+const dayLabel = (timestamp: number) => {
+  const day = new Date(timestamp).toDateString();
+  const now = new Date();
+  if (day === now.toDateString()) return "Today";
+  if (day === new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).toDateString()) return "Yesterday";
+  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: new Date(timestamp).getFullYear() === now.getFullYear() ? undefined : "numeric" }).format(timestamp);
+};
+
+function HistoryView({ history, profiles, onCopy, onDelete, onStart }: { history: HistoryItem[]; profiles: DictationProfile[]; onCopy: (text: string) => void; onDelete: (id: string) => void; onStart: () => void }) {
   const [query, setQuery] = useState("");
   const filtered = history.filter((item) => `${item.profileName} ${item.finalText}`.toLowerCase().includes(query.toLowerCase()));
   const today = history.filter((item) => new Date(item.createdAt).toDateString() === new Date().toDateString());
   const wordCount = today.reduce((sum, item) => sum + countWords(item.finalText), 0);
+  const groups = filtered.reduce<Array<{ label: string; items: HistoryItem[] }>>((list, item) => {
+    const label = dayLabel(item.createdAt);
+    const last = list[list.length - 1];
+    if (last?.label === label) last.items.push(item); else list.push({ label, items: [item] });
+    return list;
+  }, []);
   return (
-    <main className="page">
-      <header className="page-header">
-        <div><h1>History</h1><p>Stored only on this device.</p></div>
-        <div className="stat-row"><div><strong>{today.length}</strong><span>today</span></div><div><strong>{wordCount.toLocaleString()}</strong><span>words</span></div></div>
+    <main className="page history-page">
+      <header className="history-head">
+        <h1>History</h1>
+        <p className="tally"><span className="num">{today.length}</span> {today.length === 1 ? "dictation" : "dictations"} and <span className="num">{wordCount.toLocaleString()}</span> {wordCount === 1 ? "word" : "words"} today.</p>
+        <p className="history-note">Stored only on this device.</p>
       </header>
-      <div className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search dictations or modes" />{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14} /></button>}</div>
-      <section className="history-list">{filtered.length ? filtered.map((item) => <HistoryCard key={item.id} item={item} onCopy={() => onCopy(item.finalText)} onDelete={() => onDelete(item.id)} />) : <EmptyHistory searching={!!query} onStart={onStart} />}</section>
+      <div className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search dictations or modes" aria-label="Search history" />{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14} /></button>}</div>
+      {groups.length
+        ? groups.map((group) => (
+          <section className="day" key={group.label}>
+            <h2>{group.label}</h2>
+            <ol className="entries">{group.items.map((item) => <HistoryEntry key={item.id} item={item} color={pigmentOf(profiles, item.profileId)?.hex} onCopy={() => onCopy(item.finalText)} onDelete={() => onDelete(item.id)} />)}</ol>
+          </section>
+        ))
+        : <EmptyHistory searching={!!query} onStart={onStart} />}
     </main>
   );
 }
@@ -302,7 +352,13 @@ function ShortcutRecorder({ value, onChange }: { value: string; onChange: (value
     setCapturing(false);
     event.currentTarget.blur();
   };
-  return <div className={`shortcut-recorder ${capturing ? "capturing" : ""}`}><input readOnly value={capturing ? "Press your shortcut…" : value ? formatShortcut(value) : "Click to record a hotkey"} onFocus={() => setCapturing(true)} onBlur={() => setCapturing(false)} onKeyDown={onKeyDown} /><button type="button" onClick={() => onChange("")} title="Remove hotkey"><X size={13} /></button></div>;
+  return (
+    <div className={`shortcut-recorder ${capturing ? "capturing" : ""} ${value ? "" : "unset"}`}>
+      <input readOnly aria-label="Hotkey" value={capturing ? "Press your shortcut…" : value ? formatShortcut(value) : "Click to record a hotkey"} onFocus={() => setCapturing(true)} onBlur={() => setCapturing(false)} onKeyDown={onKeyDown} />
+      {!capturing && value && <Keys shortcut={value} />}
+      {value && <button type="button" onClick={() => onChange("")} title="Remove hotkey" aria-label="Remove hotkey"><X size={13} /></button>}
+    </div>
+  );
 }
 
 const SENSITIVITY_MIN_DB = -60;
@@ -321,6 +377,7 @@ function SensitivityControl({ enabled, thresholdDb, isRecording, recordingLevelD
   const monitorState = isRecording ? "active" : microphoneMonitor.state;
   const clampedLevel = Math.max(SENSITIVITY_MIN_DB, Math.min(SENSITIVITY_MAX_DB, levelDb));
   const levelPosition = ((clampedLevel - SENSITIVITY_MIN_DB) / (SENSITIVITY_MAX_DB - SENSITIVITY_MIN_DB)) * 100;
+  const thresholdPosition = ((thresholdDb - SENSITIVITY_MIN_DB) / (SENSITIVITY_MAX_DB - SENSITIVITY_MIN_DB)) * 100;
   const voiceDetected = enabled && monitorState === "active" && levelDb >= thresholdDb;
   const status = monitorState === "starting"
     ? "Starting microphone…"
@@ -328,7 +385,7 @@ function SensitivityControl({ enabled, thresholdDb, isRecording, recordingLevelD
       ? "Microphone preview unavailable"
       : monitorState === "active"
         ? voiceDetected ? "Voice detected" : "Listening for your voice"
-        : "Enable to set the cutoff";
+        : "Turn on to set the cutoff";
   const updateFromPointer = (event: React.PointerEvent<HTMLInputElement>) => {
     if (!enabled || (event.type === "pointermove" && event.buttons === 0)) return;
     if (event.type === "pointerdown") event.currentTarget.setPointerCapture(event.pointerId);
@@ -363,10 +420,11 @@ function SensitivityControl({ enabled, thresholdDb, isRecording, recordingLevelD
           <strong>{thresholdDb} dB</strong>
         </div>
         <div className={`sensitivity-meter ${voiceDetected ? "voice-detected" : ""}`}>
+          <div className="meter-quiet" style={{ width: `${thresholdPosition}%` }} />
           <div className="input-level-fill" style={{ width: `${levelPosition}%` }} />
           <input aria-label="Silence threshold" type="range" min={SENSITIVITY_MIN_DB} max={SENSITIVITY_MAX_DB} step="1" value={thresholdDb} disabled={!enabled} onPointerDown={updateFromPointer} onPointerMove={updateFromPointer} onKeyDown={adjustWithKeyboard} onChange={(event) => onThreshold(Number(event.target.value))} />
         </div>
-        <div className="sensitivity-scale"><span>Quieter speech</span><span>More noise filtered</span></div>
+        <div className="sensitivity-scale"><span>Keeps quieter speech</span><span>Filters more noise</span></div>
       </div>
     </section>
   );
@@ -450,8 +508,8 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
     <div className="provider-editor">
       <div className="form-grid">
         <label><span>Provider</span><div className="select-wrap"><select value={provider.provider} onChange={(event) => changeProvider(event.target.value as ProviderId)}>{options.map((id) => <option value={id} key={id}>{providerLabel(id)}</option>)}</select><ChevronDown size={15} /></div></label>
-        <label><span>Model</span><div className="model-combobox"><input list={listId} value={provider.model} onChange={(event) => onChange({ ...provider, model: event.target.value })} placeholder={modelsState === "loading" ? "Loading models…" : "Select or type a model ID"} /><datalist id={listId}>{[...suggested, ...models].map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</datalist><button type="button" onClick={() => void refreshModels(apiKey || undefined)} disabled={modelsState === "loading" || !provider.modelsEndpoint} title={provider.modelsEndpoint ? "Refresh available models" : "No models endpoint for this provider"}><RefreshCw size={14} className={modelsState === "loading" ? "spinning" : ""} /></button></div></label>
-        <label className={`span-two ${!provider.apiKeySet ? "needs-attention" : ""}`}><span>API key {provider.apiKeySet ? <small className="ok">Saved securely · type to replace</small> : <small className="warn">Required</small>}</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onBlur={() => commitKey(apiKey)} placeholder={provider.apiKeySet ? "••••••••••••••••" : `Paste your ${providerLabel(provider.provider)} key`} /></label>
+        <label><span>Model {modelsState === "ready" && <small className="ok"><Check size={11} strokeWidth={2.6} /> {models.length} available</small>}</span><div className="model-combobox"><input list={listId} value={provider.model} onChange={(event) => onChange({ ...provider, model: event.target.value })} placeholder={modelsState === "loading" ? "Loading models…" : "Select or type a model ID"} /><datalist id={listId}>{[...suggested, ...models].map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</datalist><button type="button" onClick={() => void refreshModels(apiKey || undefined)} disabled={modelsState === "loading" || !provider.modelsEndpoint} title={provider.modelsEndpoint ? "Refresh available models" : "No models endpoint for this provider"} aria-label="Refresh available models"><RefreshCw size={14} className={modelsState === "loading" ? "spinning" : ""} /></button></div></label>
+        <label className={`span-two ${!provider.apiKeySet ? "needs-attention" : ""}`}><span>API key {provider.apiKeySet ? <small className="ok"><Check size={11} strokeWidth={2.6} /> Saved in your keychain. Type to replace it.</small> : <small className="warn">Required</small>}</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onBlur={() => commitKey(apiKey)} placeholder={provider.apiKeySet ? "••••••••••••••••" : `Paste your ${providerLabel(provider.provider)} key`} /></label>
         <div className="span-two format-switch" role="radiogroup" aria-label="Request format">
           <span>Request format</span>
           <div>
@@ -460,10 +518,9 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
           </div>
         </div>
         <label className="span-two"><span>API endpoint {provider.endpoint.includes("YOUR-RESOURCE") && <small className="warn">Replace YOUR-RESOURCE with your resource name</small>}</span><input className="code" spellCheck={false} value={provider.endpoint} onChange={(event) => onChange({ ...provider, endpoint: event.target.value })} /></label>
-        <label className="span-two"><span>Models endpoint <small>Optional · queried to build the model list</small></span><input className="code" spellCheck={false} value={provider.modelsEndpoint} onChange={(event) => onChange({ ...provider, modelsEndpoint: event.target.value })} /></label>
+        <label className="span-two"><span>Models endpoint <small>Optional. Used to list available models.</small></span><input className="code" spellCheck={false} value={provider.modelsEndpoint} onChange={(event) => onChange({ ...provider, modelsEndpoint: event.target.value })} /></label>
         {stage === "transcription" && <label className="span-two setting-row"><div><strong>Always send WAV audio</strong><small>Needed by APIs that reject WebM (Microsoft MAI accepts WAV, MP3, FLAC). Silence trimming already sends WAV.</small></div><input type="checkbox" checked={provider.forceWav} onChange={(event) => onChange({ ...provider, forceWav: event.target.checked })} /></label>}
       </div>
-      {modelsState === "ready" && <div className="models-message success"><Check size={12} /> {models.length} models available</div>}
       {modelsState === "error" && <div className="models-message error">{modelsError}</div>}
       {provider.format === "template"
         ? <TemplateEditor provider={provider} stage={stage} onChange={onChange} onDetectedKey={setApiKey} />
@@ -473,12 +530,31 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
   );
 }
 
-function Section({ index, title, description, action, children, muted }: { index: string; title: string; description: string; action?: React.ReactNode; children?: React.ReactNode; muted?: boolean }) {
+/** One step hanging off the pipeline wire. */
+function Stage({ id, title, description, action, children, off }: { id: string; title: string; description: string; action?: React.ReactNode; children?: React.ReactNode; off?: boolean }) {
   return (
-    <section className={`section ${muted ? "muted" : ""}`}>
-      <header className="section-header"><span className="section-index">{index}</span><div><h2>{title}</h2><p>{description}</p></div>{action}</header>
-      {children && <div className="section-body">{children}</div>}
+    <section className={`stage ${off ? "off" : ""}`} id={id} aria-labelledby={`${id}-title`}>
+      <span className="stage-node" aria-hidden="true" />
+      <header className="stage-header"><div><h2 id={`${id}-title`}>{title}</h2><p>{description}</p></div>{action}</header>
+      {children && <div className="stage-body">{children}</div>}
     </section>
+  );
+}
+
+const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const jumpTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "start" });
+
+function Pipeline({ profile }: { profile: DictationProfile }) {
+  return (
+    <nav className="pipeline" aria-label="Pipeline">
+      <span className="pipe-end"><Mic size={14} strokeWidth={2} />Microphone</span>
+      <i className="pipe-wire" />
+      <button type="button" className="pipe-stage" onClick={() => jumpTo("stage-speech")}><small>Speech to text</small><strong>{profile.transcription.model || "Choose a model"}</strong></button>
+      <i className={`pipe-wire ${profile.cleanupEnabled ? "" : "bypass"}`} />
+      <button type="button" className={`pipe-stage ${profile.cleanupEnabled ? "" : "off"}`} onClick={() => jumpTo("stage-second")}><small>Second model</small><strong>{profile.cleanupEnabled ? profile.cleanup.model || "Choose a model" : "Skipped"}</strong></button>
+      <i className="pipe-wire" />
+      <button type="button" className="pipe-end" onClick={() => jumpTo("stage-delivery")}>{profile.pasteAfterDictation ? "Cursor" : "History only"}</button>
+    </nav>
   );
 }
 
@@ -495,77 +571,90 @@ interface ModeViewProps {
 
 function ModeView({ settings, saveState, saveError, onSettings, onSaveKey, onDelete, isRecording, recordingLevelDb }: ModeViewProps) {
   const profile = settings.profiles.find((item) => item.id === settings.activeProfileId) ?? settings.profiles[0];
+  const index = settings.profiles.indexOf(profile);
+  const pigment = pigmentFor(profile, index);
   const updateProfile = (changes: Partial<DictationProfile>) => onSettings({ ...settings, profiles: settings.profiles.map((item) => item.id === profile.id ? { ...item, ...changes } : item) });
   return (
-    <main className="page mode-page">
+    <main className="page mode-page" style={pig(pigment.hex)}>
       <header className="mode-header">
         <div className="mode-title-row">
-          <span className={`mode-glyph ${profile.cleanupEnabled ? "polish" : ""}`}><ModeIcon profile={profile} size={18} /></span>
           <input className="title-input" value={profile.name} onChange={(event) => updateProfile({ name: event.target.value })} placeholder="Name this mode" aria-label="Mode name" />
           <SaveStatus state={saveState} error={saveError} />
           {settings.profiles.length > 1 && <button className="ghost-icon danger" onClick={() => onDelete(profile.id)} title="Delete mode" aria-label="Delete mode"><Trash2 size={15} /></button>}
         </div>
         <div className="mode-meta-row">
-          <label className="hotkey-field"><span>Hotkey</span><ShortcutRecorder value={profile.shortcut} onChange={(shortcut) => updateProfile({ shortcut })} /></label>
-          <div className="pipeline-map" aria-label="Pipeline">
-            <span>Mic</span><i />
-            <strong>{profile.transcription.model || "Speech model"}</strong>
-            {profile.cleanupEnabled && <><i /><strong className="accent">{profile.cleanup.model || "Second model"}</strong></>}
-            <i /><span>Cursor</span>
+          <div className="hotkey-field"><span>Hotkey</span><ShortcutRecorder value={profile.shortcut} onChange={(shortcut) => updateProfile({ shortcut })} /></div>
+          <div className="pigment-picker" role="radiogroup" aria-label="Mode color">
+            {MODE_PIGMENTS.map((item) => (
+              <button type="button" role="radio" key={item.id} aria-checked={item.id === pigment.id} aria-label={item.name} title={item.name} style={{ background: item.hex }} onClick={() => updateProfile({ color: item.id })} />
+            ))}
           </div>
         </div>
+        <Pipeline profile={profile} />
       </header>
 
-      <Section index="01" title="Speech to text" description="Turns the recording into text.">
-        <ProviderEditor profile={profile} stage="transcription" onChange={(transcription) => updateProfile({ transcription })} onSaveKey={onSaveKey} />
-        <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint · sent as the prompt field, or {"{{prompt}}"} in custom requests</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>
-      </Section>
+      <div className="wire">
+        <Stage id="stage-speech" title="Speech to text" description="Turns the recording into text.">
+          <ProviderEditor profile={profile} stage="transcription" onChange={(transcription) => updateProfile({ transcription })} onSaveKey={onSaveKey} />
+          <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint. Sent as the prompt field, or as {"{{prompt}}"} in custom requests.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>
+        </Stage>
 
-      <Section
-        index="02"
-        title="Second model"
-        description="Polish, translate, format, summarize, or transform the transcript."
-        muted={!profile.cleanupEnabled}
-        action={<input type="checkbox" aria-label="Run a second model" checked={profile.cleanupEnabled} onChange={(event) => updateProfile({ cleanupEnabled: event.target.checked })} />}
-      >
-        {profile.cleanupEnabled && <>
-          <ProviderEditor profile={profile} stage="cleanup" onChange={(cleanup) => updateProfile({ cleanup })} onSaveKey={onSaveKey} />
-          <label className="field-block"><span>System instruction <small>Sent with every dictation in this mode</small></span><textarea rows={7} value={profile.systemPrompt} onChange={(event) => updateProfile({ systemPrompt: event.target.value })} placeholder="For example: Translate the transcript into concise, natural Italian. Return only the translation." /><div className="prompt-meta"><span>{profile.systemPrompt.length} characters</span><button type="button" onClick={() => updateProfile({ systemPrompt: DEFAULT_SYSTEM_PROMPT })}><RotateCcw size={12} /> Reset default</button></div></label>
-        </>}
-      </Section>
+        <Stage
+          id="stage-second"
+          title="Second model"
+          description={profile.cleanupEnabled ? "Polish, translate, format, summarize, or transform the transcript." : "Off. The transcript goes straight to the cursor."}
+          off={!profile.cleanupEnabled}
+          action={<input type="checkbox" aria-label="Run a second model" checked={profile.cleanupEnabled} onChange={(event) => updateProfile({ cleanupEnabled: event.target.checked })} />}
+        >
+          {profile.cleanupEnabled && <>
+            <ProviderEditor profile={profile} stage="cleanup" onChange={(cleanup) => updateProfile({ cleanup })} onSaveKey={onSaveKey} />
+            <label className="field-block"><span>System instruction <small>Sent with every dictation in this mode</small></span><textarea rows={7} value={profile.systemPrompt} onChange={(event) => updateProfile({ systemPrompt: event.target.value })} placeholder="For example: Translate the transcript into concise, natural Italian. Return only the translation." /><div className="prompt-meta"><span>{profile.systemPrompt.length.toLocaleString()} characters</span><button type="button" onClick={() => updateProfile({ systemPrompt: DEFAULT_SYSTEM_PROMPT })}><RotateCcw size={12} /> Reset to default</button></div></label>
+          </>}
+        </Stage>
 
-      <Section index="03" title="Behavior" description="Language, pasting, and noise handling.">
-        <div className="behavior-grid">
-          <label className="setting-row"><div><strong>Language</strong><small>Leave on auto-detect unless you only speak one language.</small></div><div className="select-wrap compact"><select value={profile.language} onChange={(event) => updateProfile({ language: event.target.value })}><option value="auto">Auto-detect</option><option value="en">English</option><option value="it">Italian</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="pt">Portuguese</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select><ChevronDown size={15} /></div></label>
-          <label className="setting-row"><div><strong>Paste automatically</strong><small>Insert the finished text at the active cursor.</small></div><input type="checkbox" checked={profile.pasteAfterDictation} onChange={(event) => updateProfile({ pasteAfterDictation: event.target.checked })} /></label>
-          <SensitivityControl enabled={profile.trimSilence} thresholdDb={profile.silenceThresholdDb} isRecording={isRecording} recordingLevelDb={recordingLevelDb} onEnabled={(trimSilence) => updateProfile({ trimSilence })} onThreshold={(silenceThresholdDb) => updateProfile({ silenceThresholdDb })} />
-        </div>
-      </Section>
+        <Stage id="stage-delivery" title="Delivery" description="Language, pasting, and noise handling.">
+          <div className="behavior-grid">
+            <label className="setting-row"><div><strong>Language</strong><small>Leave on auto-detect unless you only speak one language.</small></div><div className="select-wrap compact"><select value={profile.language} onChange={(event) => updateProfile({ language: event.target.value })}><option value="auto">Auto-detect</option><option value="en">English</option><option value="it">Italian</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="pt">Portuguese</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select><ChevronDown size={15} /></div></label>
+            <label className="setting-row"><div><strong>Paste automatically</strong><small>Insert the finished text at the active cursor.</small></div><input type="checkbox" checked={profile.pasteAfterDictation} onChange={(event) => updateProfile({ pasteAfterDictation: event.target.checked })} /></label>
+            <SensitivityControl enabled={profile.trimSilence} thresholdDb={profile.silenceThresholdDb} isRecording={isRecording} recordingLevelDb={recordingLevelDb} onEnabled={(trimSilence) => updateProfile({ trimSilence })} onThreshold={(silenceThresholdDb) => updateProfile({ silenceThresholdDb })} />
+          </div>
+        </Stage>
+      </div>
     </main>
   );
 }
 
+const CAPSULE_PREVIEW_STATES: RecordingState[] = ["recording", "processing", "success", "error"];
+const capsuleStateLabel: Partial<Record<RecordingState, string>> = { recording: "Listening", processing: "Working", success: "Pasted", error: "Failed" };
+
 function GeneralView({ settings, saveState, saveError, onSettings }: { settings: AppSettings; saveState: SaveState; saveError: string; onSettings: (settings: AppSettings) => void }) {
   const overlaySuccessDurationMs = settings.overlaySuccessDurationMs ?? 650;
+  const activeIndex = Math.max(0, settings.profiles.findIndex((item) => item.id === settings.activeProfileId));
+  const color = pigmentFor(settings.profiles[activeIndex], activeIndex).hex;
   return (
-    <main className="page">
+    <main className="page general-page" style={pig(color)}>
       <header className="page-header"><div><h1>General</h1><p>Applies to every mode.</p></div><SaveStatus state={saveState} error={saveError} /></header>
-      <section className="card settings-list">
+      <section className="settings-list">
         <div className="setting-row">
           <div><strong>Cancel recording</strong><small>Discards the audio immediately. Nothing is sent to an API.</small></div>
           <div className="hotkey-control"><ShortcutRecorder value={settings.cancelShortcut} onChange={(cancelShortcut) => onSettings({ ...settings, cancelShortcut })} /></div>
         </div>
-        <label className="setting-row">
-          <div><strong>Floating pop-up</strong><small>Show a small recording pill over other apps.</small></div>
-          <input type="checkbox" checked={settings.overlayEnabled} onChange={(event) => onSettings({ ...settings, overlayEnabled: event.target.checked })} />
-        </label>
+        <div className="setting-row overlay-setting">
+          <label className="setting-row-main">
+            <div><strong>Floating pop-up</strong><small>Show a small recording pill over other apps. It wears the color of the mode you're using.</small></div>
+            <input type="checkbox" checked={settings.overlayEnabled} onChange={(event) => onSettings({ ...settings, overlayEnabled: event.target.checked })} />
+          </label>
+          <div className={`capsule-gallery ${settings.overlayEnabled ? "" : "disabled"}`} aria-hidden="true">
+            {CAPSULE_PREVIEW_STATES.map((state) => <figure key={state}><Capsule state={state} color={color} preview /><figcaption>{capsuleStateLabel[state]}</figcaption></figure>)}
+          </div>
+        </div>
         <div className={`setting-row stacked ${settings.overlayEnabled ? "" : "disabled"}`}>
           <div className="range-heading"><div><strong>Hide after pasting</strong><small>How long the pop-up stays once text is pasted.</small></div><span className="value-pill">{overlaySuccessDurationMs < 1000 ? `${overlaySuccessDurationMs} ms` : `${(overlaySuccessDurationMs / 1000).toFixed(overlaySuccessDurationMs % 1000 ? 1 : 0)} s`}</span></div>
-          <input className="range" type="range" min="200" max="2500" step="50" value={overlaySuccessDurationMs} disabled={!settings.overlayEnabled} onChange={(event) => onSettings({ ...settings, overlaySuccessDurationMs: Number(event.target.value) })} />
+          <input className="range" type="range" aria-label="Hide after pasting" min="200" max="2500" step="50" value={overlaySuccessDurationMs} disabled={!settings.overlayEnabled} onChange={(event) => onSettings({ ...settings, overlaySuccessDurationMs: Number(event.target.value) })} style={{ "--fill": `${((overlaySuccessDurationMs - 200) / 2300) * 100}%` } as CSSProperties} />
           <div className="range-scale"><span>Faster</span><span>Slower</span></div>
         </div>
       </section>
-      <p className="footnote"><span className="status-dot" />Local-first. API keys live in your system keychain; history never leaves this device.</p>
+      <p className="footnote"><span className="status-dot" />Local-first. API keys live in your system keychain, and history never leaves this device.</p>
     </main>
   );
 }
@@ -637,6 +726,15 @@ export default function App() {
   const profile = settings.profiles.find((item) => item.id === recordingProfileId) ?? settings.profiles[0];
   const activeProfile = settings.profiles.find((item) => item.id === settings.activeProfileId) ?? settings.profiles[0];
 
+  /** What the floating pop-up shows for a mode, including the mode's pigment. */
+  const overlayFor = useCallback((current: DictationProfile, overlayState: RecordingState, visible = true) => ({
+    visible,
+    state: overlayState,
+    profileName: current.name,
+    cleanupEnabled: current.cleanupEnabled,
+    color: pigmentOf(settingsRef.current.profiles, current.id)?.hex,
+  }), []);
+
   const fail = useCallback((message: string, profileName: string, recordingPath?: string) => {
     setError(message); setState("error");
     setErrorLog((log) => [{ id: crypto.randomUUID(), at: Date.now(), message, profileName, recordingPath }, ...log].slice(0, 20));
@@ -648,7 +746,7 @@ export default function App() {
     setState("processing");
     const current = settingsRef.current.profiles.find((item) => item.id === recordingProfileRef.current) ?? settingsRef.current.profiles[0];
     const session = sessionRef.current;
-    if (settingsRef.current.overlayEnabled) void setOverlay({ visible: true, state: "processing", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+    if (settingsRef.current.overlayEnabled) void setOverlay(overlayFor(current, "processing"));
     let failedAudio: { bytes: Uint8Array; mimeType: string } | undefined;
     try {
       const recording = await recorder.stop({ trimSilence: current.trimSilence, thresholdDb: current.silenceThresholdDb, forceWav: current.transcription.forceWav });
@@ -668,11 +766,11 @@ export default function App() {
       if (session !== sessionRef.current) return;
       phaseRef.current = "idle";
       setState("success");
-      if (settingsRef.current.overlayEnabled) void setOverlay({ visible: true, state: "success", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+      if (settingsRef.current.overlayEnabled) void setOverlay(overlayFor(current, "success"));
       window.setTimeout(() => {
         // A newer dictation owns the pop-up now; don't hide it.
         if (session !== sessionRef.current || phaseRef.current !== "idle") return;
-        setState("idle"); void setOverlay({ visible: false, state: "idle", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+        setState("idle"); void setOverlay(overlayFor(current, "idle", false));
       }, settingsRef.current.overlaySuccessDurationMs ?? 650);
     } catch (cause) {
       if (session !== sessionRef.current) return;
@@ -688,14 +786,14 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
       if (session !== sessionRef.current) return;
       fail(message, current.name, recordingPath);
       if (settingsRef.current.overlayEnabled) {
-        void setOverlay({ visible: true, state: "error", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+        void setOverlay(overlayFor(current, "error"));
         window.setTimeout(() => {
           if (session !== sessionRef.current || phaseRef.current !== "idle") return;
-          void setOverlay({ visible: false, state: "idle", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+          void setOverlay(overlayFor(current, "idle", false));
         }, 2300);
       }
     }
-  }, [fail, persistHistory, recorder]);
+  }, [fail, overlayFor, persistHistory, recorder]);
 
   const start = useCallback(async (requestedProfileId?: string) => {
     if (phaseRef.current === "recording") { await finish(); return; }
@@ -715,21 +813,21 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
       if (session !== sessionRef.current) { recorder.cancel(); return; }
       phaseRef.current = "recording";
       setState("recording");
-      if (settingsRef.current.overlayEnabled) void setOverlay({ visible: true, state: "recording", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
+      if (settingsRef.current.overlayEnabled) void setOverlay(overlayFor(current, "recording"));
     } catch (cause) {
       if (session !== sessionRef.current) return;
       phaseRef.current = "idle";
       fail(cause instanceof Error ? cause.message : "Microphone access was denied.", current.name);
     }
-  }, [fail, finish, recorder]);
+  }, [fail, finish, overlayFor, recorder]);
 
   const cancel = useCallback(() => {
     sessionRef.current += 1;
     phaseRef.current = "idle";
     recorder.cancel(); setError(""); setState("idle");
     const current = settingsRef.current.profiles.find((item) => item.id === recordingProfileRef.current) ?? settingsRef.current.profiles[0];
-    void setOverlay({ visible: false, state: "idle", profileName: current.name, cleanupEnabled: current.cleanupEnabled });
-  }, [recorder]);
+    void setOverlay(overlayFor(current, "idle", false));
+  }, [overlayFor, recorder]);
 
   // Subscribe once and always call the latest handlers. Re-subscribing on every render (the mic
   // level meter re-renders ~60 times a second) briefly left two listeners alive, so one hotkey
@@ -762,7 +860,7 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
   const selectMode = (id: string) => { setSettings({ ...settings, activeProfileId: id }); setView("mode"); };
   const addMode = () => {
     const base = activeProfile;
-    const next: DictationProfile = { ...base, id: crypto.randomUUID(), name: "New mode", shortcut: "", transcription: structuredClone(base.transcription), cleanup: structuredClone(base.cleanup) };
+    const next: DictationProfile = { ...base, id: crypto.randomUUID(), name: "New mode", shortcut: "", color: unusedPigment(settings.profiles), transcription: structuredClone(base.transcription), cleanup: structuredClone(base.cleanup) };
     setSettings({ ...settings, profiles: [...settings.profiles, next], activeProfileId: next.id });
     setView("mode");
   };
@@ -776,10 +874,12 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
   const deleteItem = (id: string) => persistHistory(history.filter((item) => item.id !== id));
   const copy = (text: string) => void navigator.clipboard.writeText(text);
   const content = useMemo(() => {
-    if (view === "history") return <HistoryView history={history} onCopy={copy} onDelete={deleteItem} onStart={() => void start()} />;
+    if (view === "history") return <HistoryView history={history} profiles={settings.profiles} onCopy={copy} onDelete={deleteItem} onStart={() => void start()} />;
     if (view === "general") return <GeneralView settings={settings} saveState={saveState} saveError={saveError} onSettings={setSettings} />;
     return <ModeView settings={settings} saveState={saveState} saveError={saveError} onSettings={setSettings} onSaveKey={saveKey} onDelete={deleteMode} isRecording={recorder.isRecording} recordingLevelDb={recorder.inputLevelDb} />;
   }, [history, recorder.inputLevelDb, recorder.isRecording, saveError, saveKey, saveState, settings, start, view]);
+
+  const dictateProfile = state === "idle" ? activeProfile : profile;
 
   return (
     <div className="app-shell">
@@ -793,7 +893,9 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
         onDeleteMode={deleteMode}
         dictate={{
           state,
-          profile: state === "idle" ? activeProfile : profile,
+          profile: dictateProfile,
+          color: pigmentOf(settings.profiles, dictateProfile.id)?.hex ?? MODE_PIGMENTS[0].hex,
+          levels: recorder.levels,
           error,
           errorLog,
           logOpen: logOpen || state === "error",

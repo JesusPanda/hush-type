@@ -134,7 +134,7 @@ export function TemplateEditor({ provider, stage, onChange, onDetectedKey }: Tem
       <div className="template-toolbar">
         <div className="select-wrap preset-select"><select value={presetValue} onChange={(event) => applyPreset(event.target.value)} title={matchedPreset?.description}>
           {presetValue === "" && <option value="" disabled>Start from a template…</option>}
-          {editedPreset && <option value="__edited" disabled>{editedPreset.label} · edited</option>}
+          {editedPreset && <option value="__edited" disabled>{editedPreset.label} (edited)</option>}
           {presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.label}</option>)}
         </select><ChevronDown size={14} /></div>
         <button type="button" className={`curl-button ${curlOpen ? "active" : ""}`} onClick={() => setCurlOpen(!curlOpen)}><ClipboardPaste size={13} /> Import from cURL</button>
@@ -166,7 +166,7 @@ export function TemplateEditor({ provider, stage, onChange, onDetectedKey }: Tem
       {template.bodyType === "binary" && <p className="template-hint">The recording is sent as the raw request body. Add a <code>Content-Type</code> header (for example <code>{"{{mime_type}}"}</code>) if the API needs one.</p>}
 
       <div className="form-grid">
-        <label className="span-two"><span>Response path <small>Where the text is in the response · empty = auto-detect</small></span><input className="code" spellCheck={false} value={template.responsePath} onChange={(event) => setTemplate({ responsePath: event.target.value })} placeholder="e.g. combinedPhrases.0.text or choices.0.message.content" /></label>
+        <label className="span-two"><span>Response path <small>Where the text is in the response. Leave empty to auto-detect.</small></span><input className="code" spellCheck={false} value={template.responsePath} onChange={(event) => setTemplate({ responsePath: event.target.value })} placeholder="e.g. combinedPhrases.0.text or choices.0.message.content" /></label>
       </div>
       <PlaceholderLegend stage={stage} />
     </div>
@@ -179,8 +179,8 @@ export function ExtraParamsEditor({ provider, stage, onChange }: { provider: Pro
     <details className="extra-params" open={count > 0}>
       <summary>Extra request parameters {count > 0 && <em>{count}</em>}<ChevronDown size={12} /></summary>
       <p>{stage === "transcription"
-        ? "Added as form fields — e.g. temperature = 0 or timestamp_granularities[] = word. Set a value to null to drop a default field (language, prompt, response_format)."
-        : "Merged into the JSON body — e.g. reasoning_effort = low, max_tokens = 800; dots nest (reasoning.effort). Numbers, booleans, and JSON are parsed. Set temperature = null to drop it."}</p>
+        ? "Added as form fields, for example temperature = 0 or timestamp_granularities[] = word. Set a value to null to drop a default field (language, prompt, response_format)."
+        : "Merged into the JSON body, for example reasoning_effort = low or max_tokens = 800. Dots nest (reasoning.effort). Numbers, booleans, and JSON are parsed. Set temperature = null to drop it."}</p>
       <KeyValueEditor items={provider.extraParams} onChange={(extraParams) => onChange({ ...provider, extraParams })} keyPlaceholder="Parameter" valuePlaceholder="Value" addLabel="Add parameter" />
     </details>
   );

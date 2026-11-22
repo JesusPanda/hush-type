@@ -128,6 +128,8 @@ export interface OverlayPayload {
   state: RecordingState;
   profileName: string;
   cleanupEnabled: boolean;
+  /** Pigment hex of the dictating mode. */
+  color?: string;
 }
 
 export async function setOverlay(payload: OverlayPayload): Promise<void> {

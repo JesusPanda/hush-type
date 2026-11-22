@@ -71,6 +71,9 @@ struct DictationProfile {
     trim_silence: bool,
     #[serde(default = "default_silence_threshold")]
     silence_threshold_db: f32,
+    /// Pigment the UI uses for this mode. Empty picks one from the mode's position.
+    #[serde(default)]
+    color: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +163,7 @@ fn default_profile(
         paste_after_dictation: true,
         trim_silence: true,
         silence_threshold_db: default_silence_threshold(),
+        color: String::new(),
     }
 }
 
@@ -207,6 +211,8 @@ struct OverlayPayload {
     state: String,
     profile_name: String,
     cleanup_enabled: bool,
+    #[serde(default)]
+    color: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +375,7 @@ fn migrate_legacy_settings(legacy: LegacySettings) -> AppSettings {
         paste_after_dictation: legacy.paste_after_dictation,
         trim_silence: true,
         silence_threshold_db: default_silence_threshold(),
+        color: String::new(),
     };
     let mut polish = base.clone();
     polish.id = "polish".into();

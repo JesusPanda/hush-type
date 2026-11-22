@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import OverlayApp from "./OverlayApp";
+import "@fontsource-variable/funnel-display";
+import "@fontsource-variable/funnel-sans";
 import "./styles.css";
 
 const isOverlay = new URLSearchParams(window.location.search).has("overlay");
