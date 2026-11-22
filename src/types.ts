@@ -60,6 +60,8 @@ export interface DictationProfile {
   pasteAfterDictation: boolean;
   trimSilence: boolean;
   silenceThresholdDb: number;
+  /** Pigment id from MODE_PIGMENTS. Empty or unknown picks one from the mode's position. */
+  color?: string;
 }
 
 export interface AppSettings {
@@ -156,6 +158,25 @@ export const normalizeProvider = (value: Partial<ProviderSettings> & Pick<Provid
   template: { ...emptyTemplate(), ...(value.template ?? {}) },
   forceWav: value.forceWav ?? false,
 });
+
+/** Each mode wears one pigment across the app and the floating pop-up. */
+export const MODE_PIGMENTS = [
+  { id: "lilac", name: "Lilac", hex: "#b8a4ff" },
+  { id: "apricot", name: "Apricot", hex: "#ffb088" },
+  { id: "sky", name: "Sky", hex: "#86c8ff" },
+  { id: "butter", name: "Butter", hex: "#eed36f" },
+  { id: "seafoam", name: "Seafoam", hex: "#79d8c6" },
+  { id: "orchid", name: "Orchid", hex: "#f49ad6" },
+] as const;
+
+export const pigmentFor = (profile: Pick<DictationProfile, "color"> | undefined, index = 0) =>
+  MODE_PIGMENTS.find((item) => item.id === profile?.color) ?? MODE_PIGMENTS[Math.max(0, index) % MODE_PIGMENTS.length];
+
+/** The first pigment no other mode is wearing, so a new mode stands apart. */
+export const unusedPigment = (profiles: DictationProfile[]) => {
+  const taken = new Set(profiles.map((profile, index) => pigmentFor(profile, index).id));
+  return (MODE_PIGMENTS.find((item) => !taken.has(item.id)) ?? MODE_PIGMENTS[profiles.length % MODE_PIGMENTS.length]).id;
+};
 
 export const normalizeSettings = (settings: AppSettings): AppSettings => ({
   ...settings,
@@ -536,6 +557,7 @@ const rawProfile = (): DictationProfile => ({
   pasteAfterDictation: true,
   trimSilence: true,
   silenceThresholdDb: -45,
+  color: "sky",
 });
 
 const polishProfile = (): DictationProfile => ({
@@ -544,6 +566,7 @@ const polishProfile = (): DictationProfile => ({
   name: "Polish my words",
   shortcut: "CommandOrControl+Shift+P",
   cleanupEnabled: true,
+  color: "lilac",
 });
 
 export const createDefaultSettings = (): AppSettings => ({
