@@ -178,7 +178,9 @@ export function ExtraParamsEditor({ provider, stage, onChange }: { provider: Pro
   return (
     <details className="extra-params" open={count > 0}>
       <summary>Extra request parameters {count > 0 && <em>{count}</em>}<ChevronDown size={12} /></summary>
-      <p>{stage === "transcription"
+      <p>{stage === "transcription" && provider.provider === "gemini"
+        ? "Merged into the JSON body. Dots nest, for example generation_config.transcription_config.language_codes = [\"en-US\", \"it-IT\"]. Numbers, booleans, and JSON are parsed."
+        : stage === "transcription"
         ? "Added as form fields, for example temperature = 0 or timestamp_granularities[] = word. Set a value to null to drop a default field (language, prompt, response_format)."
         : "Merged into the JSON body, for example reasoning_effort = low or max_tokens = 800. Dots nest (reasoning.effort). Numbers, booleans, and JSON are parsed. Set temperature = null to drop it."}</p>
       <KeyValueEditor items={provider.extraParams} onChange={(extraParams) => onChange({ ...provider, extraParams })} keyPlaceholder="Parameter" valuePlaceholder="Value" addLabel="Add parameter" />

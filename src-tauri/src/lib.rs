@@ -42,10 +42,17 @@ struct ProviderSettings {
     /// Frontend hint: always upload 16 kHz WAV, for APIs that reject WebM.
     #[serde(default)]
     force_wav: bool,
+    /// Gemini transcription mode: `smart` (cleanup, formatting, voice editing) or `verbatim`.
+    #[serde(default = "default_transcribe_mode")]
+    transcribe_mode: String,
 }
 
 fn default_format() -> String {
     "openai".into()
+}
+
+fn default_transcribe_mode() -> String {
+    "smart".into()
 }
 
 impl ProviderSettings {
@@ -127,6 +134,7 @@ fn groq_transcription() -> ProviderSettings {
         extra_params: Vec::new(),
         template: RequestTemplate::default(),
         force_wav: false,
+        transcribe_mode: default_transcribe_mode(),
     }
 }
 
@@ -141,6 +149,7 @@ fn cerebras_cleanup() -> ProviderSettings {
         extra_params: Vec::new(),
         template: RequestTemplate::default(),
         force_wav: false,
+        transcribe_mode: default_transcribe_mode(),
     }
 }
 
@@ -869,6 +878,119 @@ async fn send_openai_transcription(
     Ok(adapters::HttpOutcome { status, body })
 }
 
+/// The Interactions API revision HushType was written against.
+const GEMINI_API_REVISION: &str = "2026-05-20";
+/// Google accepts up to 1,000 vocabulary terms; quality is best around 100.
+const GEMINI_VOCABULARY_LIMIT: usize = 1_000;
+
+/// Splits the speech prompt into vocabulary terms. Commas, semicolons, and new lines separate them.
+fn vocabulary_terms(prompt: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    prompt
+        .split([',', ';', '\n', '\r'])
+        .map(str::trim)
+        .filter(|term| !term.is_empty() && seen.insert(term.to_lowercase()))
+        .take(GEMINI_VOCABULARY_LIMIT)
+        .map(str::to_string)
+        .collect()
+}
+
+fn gemini_transcription_body(
+    provider: &ProviderSettings,
+    vars: &Vars,
+    audio_base64: String,
+    mime_type: &str,
+) -> Value {
+    let mode = if provider.transcribe_mode == "verbatim" {
+        "verbatim"
+    } else {
+        "smart"
+    };
+    let mut config = json!({ "mode": mode });
+    if !vars["locale"].is_empty() {
+        config["language_codes"] = json!([vars["locale"]]);
+    }
+    let vocabulary = vocabulary_terms(&vars["prompt"]);
+    if !vocabulary.is_empty() {
+        config["custom_vocabulary"] = json!(vocabulary);
+    }
+    let mut body = json!({
+        "model": provider.model.trim(),
+        "input": [{
+            "type": "audio",
+            "data": audio_base64,
+            "mime_type": mime_type.split(';').next().unwrap_or("audio/webm").trim(),
+        }],
+        "store": false,
+        "generation_config": { "transcription_config": config },
+    });
+    for param in provider
+        .extra_params
+        .iter()
+        .filter(|param| !param.key.trim().is_empty())
+    {
+        let value = parse_extra_value(&adapters::render(
+            &param.value,
+            vars,
+            adapters::Escape::Plain,
+        ));
+        set_json_path(&mut body, param.key.trim(), value);
+    }
+    body
+}
+
+/// Gemini 3.5 Transcribe through the Interactions API, in Smart or Verbatim mode with custom vocabulary.
+async fn send_gemini_transcription(
+    client: &reqwest::Client,
+    provider: &ProviderSettings,
+    vars: &Vars,
+    key: &str,
+    bytes: &[u8],
+    mime_type: &str,
+) -> Result<adapters::HttpOutcome, String> {
+    use base64::Engine;
+    let audio = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let body = gemini_transcription_body(provider, vars, audio, mime_type);
+    let response = client
+        .post(provider.endpoint.trim())
+        .header("x-goog-api-key", key)
+        .header("Api-Revision", GEMINI_API_REVISION)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach Gemini: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Gemini returned an unreadable response: {error}"))?;
+    Ok(adapters::HttpOutcome { status, body })
+}
+
+/// Joins the text parts of the model's output steps.
+fn gemini_transcript(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body.trim()).ok()?;
+    let is = |item: &Value, kind: &str| {
+        item.get("type")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value == kind)
+    };
+    let text = value
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|step| is(step, "model_output"))
+        .filter_map(|step| step.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| is(part, "text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<String>();
+    Some(text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .or_else(|| adapters::extract_text(body, "output_text"))
+}
+
 /// Delimits the transcript so the model treats it as text to transform, not a message to answer.
 fn wrap_transcript(text: &str) -> String {
     format!(
@@ -946,6 +1068,9 @@ async fn run_stage(
         adapters::send(client, &provider.template, &vars, audio).await?
     } else {
         match input {
+            StageInput::Audio { bytes, mime_type } if provider.provider == "gemini" => {
+                send_gemini_transcription(client, provider, &vars, &key, bytes, mime_type).await?
+            }
             StageInput::Audio { bytes, mime_type } => {
                 send_openai_transcription(client, provider, &vars, &key, bytes, mime_type).await?
             }
@@ -955,6 +1080,8 @@ async fn run_stage(
             }
         }
     };
+    let gemini_transcription =
+        !provider.uses_template() && stage == "transcription" && provider.provider == "gemini";
     let path = if provider.uses_template() {
         provider.template.response_path.as_str()
     } else if stage == "transcription" {
@@ -964,7 +1091,13 @@ async fn run_stage(
     };
     let text = outcome
         .is_success()
-        .then(|| adapters::extract_text(&outcome.body, path))
+        .then(|| {
+            if gemini_transcription {
+                gemini_transcript(&outcome.body)
+            } else {
+                adapters::extract_text(&outcome.body, path)
+            }
+        })
         .flatten();
     Ok(StageOutcome {
         status: outcome.status,
@@ -997,6 +1130,8 @@ fn stage_result(outcome: StageOutcome, label: &str, path: &str) -> Result<String
 fn response_path_label(provider: &ProviderSettings) -> &str {
     if provider.uses_template() {
         provider.template.response_path.trim()
+    } else if provider.provider == "gemini" {
+        "steps[].content[].text"
     } else {
         ""
     }
@@ -1472,6 +1607,71 @@ mod tests {
             value: "Bearer {{api_key}}".into(),
         });
         assert!(provider_needs_key(&provider));
+    }
+
+    fn gemini_provider(mode: &str) -> ProviderSettings {
+        let mut provider = groq_transcription();
+        provider.provider = "gemini".into();
+        provider.model = "gemini-3.5-transcribe".into();
+        provider.transcribe_mode = mode.into();
+        provider
+    }
+
+    #[test]
+    fn gemini_body_carries_mode_language_and_vocabulary() {
+        let vars = Vars::from([
+            ("locale".to_string(), "en-US".to_string()),
+            (
+                "prompt".to_string(),
+                "T3 Code, subagents,\nSubagents , , Tauri".to_string(),
+            ),
+        ]);
+        let body = gemini_transcription_body(
+            &gemini_provider("verbatim"),
+            &vars,
+            "QUJD".into(),
+            "audio/webm;codecs=opus",
+        );
+        let config = &body["generation_config"]["transcription_config"];
+        assert_eq!(config["mode"], "verbatim");
+        assert_eq!(config["language_codes"], json!(["en-US"]));
+        assert_eq!(
+            config["custom_vocabulary"],
+            json!(["T3 Code", "subagents", "Tauri"])
+        );
+        assert_eq!(body["input"][0]["mime_type"], "audio/webm");
+        assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn gemini_auto_language_and_empty_prompt_are_omitted() {
+        let vars = Vars::from([
+            ("locale".to_string(), String::new()),
+            ("prompt".to_string(), "  ".to_string()),
+        ]);
+        let body =
+            gemini_transcription_body(&gemini_provider("smart"), &vars, String::new(), "audio/wav");
+        assert_eq!(
+            body["generation_config"]["transcription_config"],
+            json!({ "mode": "smart" })
+        );
+    }
+
+    #[test]
+    fn gemini_transcript_reads_model_output_steps() {
+        let body = r#"{"status":"completed","steps":[{"type":"user_input","content":[{"type":"audio"}]},{"type":"model_output","content":[{"type":"text","text":"Hello from T3 Code."}]}]}"#;
+        assert_eq!(
+            gemini_transcript(body).as_deref(),
+            Some("Hello from T3 Code.")
+        );
+        assert_eq!(gemini_transcript(r#"{"steps":[]}"#), None);
+    }
+
+    #[test]
+    fn saved_providers_default_to_smart_mode() {
+        let saved = r#"{"provider":"gemini","endpoint":"","model":"gemini-3.5-transcribe"}"#;
+        let provider: ProviderSettings = serde_json::from_str(saved).expect("parses");
+        assert_eq!(provider.transcribe_mode, "smart");
     }
 
     #[test]
