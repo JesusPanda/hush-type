@@ -14,7 +14,7 @@ You can add, rename, duplicate by configuration, or delete modes. Every mode own
 - Any number of user-created modes with independent global hotkeys
 - Per-mode pipelines: speech-to-text followed by an optional transformation model
 - Groq, Cerebras, Gemini, OpenAI, Anthropic, Azure OpenAI, and custom correction providers
-- Google Gemini 3.5 Transcribe (Smart and Direct modes, custom vocabulary), Microsoft Azure Speech (MAI-Transcribe-2, LLM Speech, Fast Transcription), and Deepgram speech-to-text
+- Google Gemini speech-to-text (`gemini-3.5-transcribe` and multimodal Gemini models via the Interactions API, with Smart and Direct modes), Microsoft Azure Speech (MAI-Transcribe-2, LLM Speech, Fast Transcription), and Deepgram speech-to-text
 - Custom request templates for APIs that are not OpenAI-compatible, with cURL import and a live test panel
 - Extra request parameters for OpenAI-compatible providers (reasoning effort, temperature, timestamps…)
 - Provider model discovery through editable Models API endpoints
@@ -64,14 +64,14 @@ Placeholders are escaped for where they appear (URL, JSON, header); `{{raw:name}
 
 **Test this stage** re-sends your most recent recording (or a sample transcript for the second stage) with the unsaved settings and shows the HTTP status, the extracted text, and the raw response.
 
-### Google Gemini 3.5 Transcribe
+### Google Gemini
 
-Choose **Google Gemini** as the speech provider and paste a Gemini API key. HushType calls the Interactions API (`/v1beta/interactions`) with `gemini-3.5-transcribe` and offers both of its modes:
+Choose **Google Gemini** as the speech provider and paste a Gemini API key. HushType calls the Interactions API (`/v1beta/interactions`) and supports both `gemini-3.5-transcribe` (dedicated STT) and multimodal Gemini models (`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-3.8-flash`, `gemini-4-hydrogen`, `gemini-3.1-pro-preview`) for higher daily request limits. Both families support the two transcription modes:
 
 - **Smart** (default) removes fillers and false starts, keeps only your final self-correction, formats lists, numbers, dates, and currency, and applies spoken edits such as "delete the last sentence" or "make that a bulleted list".
 - **Direct** is verbatim: an exact word-for-word transcript.
 
-The mode's speech prompt becomes **Custom vocabulary**: list names and terms separated by commas or new lines and they are sent as `custom_vocabulary` (up to 1,000 terms; Google recommends about 100). A fixed language is sent as `language_codes`; auto-detect sends none.
+For `gemini-3.5-transcribe`, the mode's speech prompt becomes **Custom vocabulary**: list names and terms separated by commas or new lines and they are sent as `custom_vocabulary` (up to 1,000 terms; Google recommends about 100), and a fixed language is sent as `language_codes` (auto-detect sends none). For multimodal Gemini models, it becomes **Speech prompt & vocabulary** and any names, jargon, or style hints you enter are appended to Gemini's transcription instruction.
 
 ### Microsoft MAI-Transcribe
 

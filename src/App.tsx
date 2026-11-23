@@ -41,13 +41,14 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_SYSTEM_PROMPT,
   MODE_PIGMENTS,
-  SUGGESTED_MODELS,
   TEMPLATE_PRESETS,
   applyTemplatePreset,
+  isGeminiDedicatedTranscribe,
   isNativeGeminiSpeech,
   normalizeSettings,
   pigmentFor,
   providerDefaults,
+  suggestedModelsFor,
   unusedPigment,
   type AppSettings,
   type DictationProfile,
@@ -504,19 +505,20 @@ function ProviderEditor({ profile, stage, onChange, onSaveKey }: ProviderEditorP
   const options: ProviderId[] = stage === "transcription"
     ? ["groq", "gemini", "openai", "azure-speech", "azure-openai", "deepgram", "custom"]
     : ["cerebras", "gemini", "groq", "openai", "anthropic", "azure-openai", "custom"];
-  const suggested = (SUGGESTED_MODELS[provider.provider] ?? []).filter((item) => !models.some((model) => model.id === item.id));
+  const suggested = suggestedModelsFor(provider.provider, stage);
+  const discovered = models.filter((model) => !suggested.some((item) => item.id === model.id));
   const listId = `models-${profile.id}-${stage}`;
   const geminiSpeech = stage === "transcription" && provider.provider === "gemini";
   return (
     <div className="provider-editor">
       <div className="form-grid">
         <label><span>Provider</span><div className="select-wrap"><select value={provider.provider} onChange={(event) => changeProvider(event.target.value as ProviderId)}>{options.map((id) => <option value={id} key={id}>{providerLabel(id)}</option>)}</select><ChevronDown size={15} /></div></label>
-        <label><span>Model {modelsState === "ready" && <small className="ok"><Check size={11} strokeWidth={2.6} /> {models.length} available</small>}</span><div className="model-combobox"><input list={listId} value={provider.model} onChange={(event) => onChange({ ...provider, model: event.target.value })} placeholder={modelsState === "loading" ? "Loading models…" : "Select or type a model ID"} /><datalist id={listId}>{[...suggested, ...models].map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</datalist><button type="button" onClick={() => void refreshModels(apiKey || undefined)} disabled={modelsState === "loading" || !provider.modelsEndpoint} title={provider.modelsEndpoint ? "Refresh available models" : "No models endpoint for this provider"} aria-label="Refresh available models"><RefreshCw size={14} className={modelsState === "loading" ? "spinning" : ""} /></button></div></label>
+        <label><span>Model {modelsState === "ready" && <small className="ok"><Check size={11} strokeWidth={2.6} /> {models.length} available</small>}</span><div className="model-combobox"><input list={listId} value={provider.model} onChange={(event) => onChange({ ...provider, model: event.target.value })} placeholder={modelsState === "loading" ? "Loading models…" : "Select or type a model ID"} /><datalist id={listId}>{[...suggested, ...discovered].map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</datalist><button type="button" onClick={() => void refreshModels(apiKey || undefined)} disabled={modelsState === "loading" || !provider.modelsEndpoint} title={provider.modelsEndpoint ? "Refresh available models" : "No models endpoint for this provider"} aria-label="Refresh available models"><RefreshCw size={14} className={modelsState === "loading" ? "spinning" : ""} /></button></div></label>
         <label className={`span-two ${!provider.apiKeySet ? "needs-attention" : ""}`}><span>API key {provider.apiKeySet ? <small className="ok"><Check size={11} strokeWidth={2.6} /> Saved in your keychain. Type to replace it.</small> : <small className="warn">Required</small>}</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onBlur={() => commitKey(apiKey)} placeholder={provider.apiKeySet ? "••••••••••••••••" : `Paste your ${providerLabel(provider.provider)} key`} /></label>
         <div className="span-two format-switch" role="radiogroup" aria-label="Request format">
           <span>Request format</span>
           <div>
-            <button type="button" role="radio" aria-checked={provider.format === "openai"} className={provider.format === "openai" ? "active" : ""} onClick={() => changeFormat("openai")}>{geminiSpeech ? "Gemini Transcribe" : "OpenAI-compatible"}</button>
+            <button type="button" role="radio" aria-checked={provider.format === "openai"} className={provider.format === "openai" ? "active" : ""} onClick={() => changeFormat("openai")}>{geminiSpeech ? "Gemini API" : "OpenAI-compatible"}</button>
             <button type="button" role="radio" aria-checked={provider.format === "template"} className={provider.format === "template" ? "active" : ""} onClick={() => changeFormat("template")}>Custom request</button>
           </div>
         </div>
@@ -628,9 +630,11 @@ function ModeView({ settings, saveState, saveError, onSettings, onSaveKey, onDel
       <div className="wire">
         <Stage id="stage-speech" title="Speech to text" description="Turns the recording into text.">
           <ProviderEditor profile={profile} stage="transcription" onChange={(transcription) => updateProfile({ transcription })} onSaveKey={onSaveKey} />
-          {isNativeGeminiSpeech(profile.transcription, "transcription")
+          {isGeminiDedicatedTranscribe(profile.transcription, "transcription")
             ? <label className="field-block"><span>Custom vocabulary <small>Names and terms to spell exactly, separated by commas or new lines. Sent as custom_vocabulary: up to 1,000 terms, best under 100.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="T3 Code, subagents, Claude Code, Tauri" /></label>
-            : <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint. Sent as the prompt field, or as {"{{prompt}}"} in custom requests.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>}
+            : isNativeGeminiSpeech(profile.transcription, "transcription")
+              ? <label className="field-block"><span>Speech prompt & vocabulary <small>Optional names, jargon, or style hints added to Gemini's transcription instruction.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="T3 Code, subagents, Claude Code, Tauri" /></label>
+              : <label className="field-block"><span>Speech prompt <small>Optional vocabulary or style hint. Sent as the prompt field, or as {"{{prompt}}"} in custom requests.</small></span><textarea rows={2} value={profile.transcriptionPrompt} onChange={(event) => updateProfile({ transcriptionPrompt: event.target.value })} placeholder="For example: HushType, Kubernetes, Tauri. Spell product names exactly like this." /></label>}
         </Stage>
 
         <Stage
