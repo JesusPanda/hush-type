@@ -895,35 +895,77 @@ fn vocabulary_terms(prompt: &str) -> Vec<String> {
         .collect()
 }
 
+fn is_gemini_transcribe_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().contains("transcribe")
+}
+
 fn gemini_transcription_body(
     provider: &ProviderSettings,
     vars: &Vars,
     audio_base64: String,
     mime_type: &str,
 ) -> Value {
-    let mode = if provider.transcribe_mode == "verbatim" {
-        "verbatim"
+    let clean_mime = mime_type.split(';').next().unwrap_or("audio/webm").trim();
+    let locale = vars.get("locale").map(String::as_str).unwrap_or("").trim();
+    let prompt = vars.get("prompt").map(String::as_str).unwrap_or("").trim();
+    let mut body = if is_gemini_transcribe_model(&provider.model) {
+        let mode = if provider.transcribe_mode == "verbatim" {
+            "verbatim"
+        } else {
+            "smart"
+        };
+        let mut config = json!({ "mode": mode });
+        if !locale.is_empty() {
+            config["language_codes"] = json!([locale]);
+        }
+        let vocabulary = vocabulary_terms(prompt);
+        if !vocabulary.is_empty() {
+            config["custom_vocabulary"] = json!(vocabulary);
+        }
+        json!({
+            "model": provider.model.trim(),
+            "input": [{
+                "type": "audio",
+                "data": audio_base64,
+                "mime_type": clean_mime,
+            }],
+            "store": false,
+            "generation_config": { "transcription_config": config },
+        })
     } else {
-        "smart"
+        let mut instruction = if provider.transcribe_mode == "verbatim" {
+            "You are a speech-to-text transcription engine. Transcribe the audio verbatim, outputting only the spoken words in sequence. Keep filler words, repetitions, and false starts as spoken. Output only the transcript text with no commentary, labels, timestamps, or markdown. If there is no speech, output nothing."
+        } else {
+            "You are a speech-to-text transcription engine. Transcribe the spoken audio into clean, ready-to-paste text. Remove filler words, stutters, and false starts; keep only the speaker's final wording when they self-correct; apply natural punctuation, capitalization, and formatting for lists, numbers, dates, and currency; and follow explicit spoken formatting edits. Output only the finished transcript text with no commentary, labels, timestamps, or markdown. If there is no speech, output nothing."
+        }
+        .to_string();
+        if !locale.is_empty() {
+            instruction.push_str(&format!(
+                "\nThe spoken language is {locale}. Transcribe in that language."
+            ));
+        }
+        if !prompt.is_empty() {
+            instruction.push_str(&format!(
+                "\nVocabulary and style hints (prefer these exact spellings when heard): {prompt}"
+            ));
+        }
+        json!({
+            "model": provider.model.trim(),
+            "system_instruction": instruction,
+            "input": [
+                {
+                    "type": "audio",
+                    "data": audio_base64,
+                    "mime_type": clean_mime,
+                },
+                {
+                    "type": "text",
+                    "text": "Transcribe the speech in this audio.",
+                },
+            ],
+            "store": false,
+        })
     };
-    let mut config = json!({ "mode": mode });
-    if !vars["locale"].is_empty() {
-        config["language_codes"] = json!([vars["locale"]]);
-    }
-    let vocabulary = vocabulary_terms(&vars["prompt"]);
-    if !vocabulary.is_empty() {
-        config["custom_vocabulary"] = json!(vocabulary);
-    }
-    let mut body = json!({
-        "model": provider.model.trim(),
-        "input": [{
-            "type": "audio",
-            "data": audio_base64,
-            "mime_type": mime_type.split(';').next().unwrap_or("audio/webm").trim(),
-        }],
-        "store": false,
-        "generation_config": { "transcription_config": config },
-    });
     for param in provider
         .extra_params
         .iter()
@@ -939,7 +981,8 @@ fn gemini_transcription_body(
     body
 }
 
-/// Gemini 3.5 Transcribe through the Interactions API, in Smart or Verbatim mode with custom vocabulary.
+/// Gemini transcription through the Interactions API for both `gemini-3.5-transcribe`
+/// (`transcription_config`) and general multimodal Gemini models (`system_instruction` + audio input).
 async fn send_gemini_transcription(
     client: &reqwest::Client,
     provider: &ProviderSettings,
@@ -1248,22 +1291,53 @@ async fn list_models(
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models.dedup_by(|a, b| a.id == b.id);
     if stage == "transcription" {
-        let speech_models: Vec<ModelOption> = models
-            .iter()
-            .filter(|model| {
-                let id = model.id.to_ascii_lowercase();
-                id.contains("whisper") || id.contains("transcrib") || id.contains("nova")
-            })
-            .map(|model| ModelOption {
-                id: model.id.clone(),
-                name: model.name.clone(),
-            })
-            .collect();
-        if !speech_models.is_empty() {
-            return Ok(speech_models);
-        }
+        return Ok(filter_transcription_models(&provider.provider, models));
     }
     Ok(models)
+}
+
+fn is_gemini_audio_input_model(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    if !id.starts_with("gemini-") {
+        return false;
+    }
+    const EXCLUDED: &[&str] = &[
+        "-live",
+        "live-",
+        "-tts",
+        "tts-",
+        "-image",
+        "imagen",
+        "nano-banana",
+        "embedding",
+        "veo",
+        "lyria",
+        "genie",
+        "aqa",
+        "robotics",
+        "decision",
+        "omni",
+    ];
+    !EXCLUDED.iter().any(|needle| id.contains(needle))
+}
+
+fn filter_transcription_models(provider_id: &str, models: Vec<ModelOption>) -> Vec<ModelOption> {
+    let matches: fn(&str) -> bool = if provider_id == "gemini" {
+        is_gemini_audio_input_model
+    } else {
+        |id| {
+            let id = id.to_ascii_lowercase();
+            id.contains("whisper") || id.contains("transcrib") || id.contains("nova")
+        }
+    };
+    if models.iter().any(|model| matches(&model.id)) {
+        models
+            .into_iter()
+            .filter(|model| matches(&model.id))
+            .collect()
+    } else {
+        models
+    }
 }
 
 fn audio_extension(mime_type: &str) -> &'static str {
@@ -1665,6 +1739,175 @@ mod tests {
             Some("Hello from T3 Code.")
         );
         assert_eq!(gemini_transcript(r#"{"steps":[]}"#), None);
+    }
+
+    #[test]
+    fn gemini_multimodal_body_uses_system_instruction_and_audio_input() {
+        let mut smart_provider = gemini_provider("smart");
+        smart_provider.model = "gemini-3.5-flash-lite".into();
+        let vars = Vars::from([
+            ("locale".to_string(), "en-US".to_string()),
+            ("prompt".to_string(), "HushType, Tauri".to_string()),
+        ]);
+        let smart_body = gemini_transcription_body(
+            &smart_provider,
+            &vars,
+            "QUJD".into(),
+            "audio/webm;codecs=opus",
+        );
+        assert_eq!(smart_body["model"], "gemini-3.5-flash-lite");
+        assert_eq!(smart_body["store"], false);
+        assert!(smart_body.get("generation_config").is_none());
+        let smart_instruction = smart_body["system_instruction"]
+            .as_str()
+            .expect("system_instruction should be a string");
+        assert!(smart_instruction.contains("Remove filler words"));
+        assert!(smart_instruction.contains("The spoken language is en-US."));
+        assert!(smart_instruction.contains("HushType, Tauri"));
+        assert_eq!(
+            smart_body["input"],
+            json!([
+                {
+                    "type": "audio",
+                    "data": "QUJD",
+                    "mime_type": "audio/webm",
+                },
+                {
+                    "type": "text",
+                    "text": "Transcribe the speech in this audio.",
+                },
+            ])
+        );
+
+        let mut verbatim_provider = gemini_provider("verbatim");
+        verbatim_provider.model = "gemini-3.5-flash-lite".into();
+        let verbatim_body =
+            gemini_transcription_body(&verbatim_provider, &Vars::new(), "QUJD".into(), "audio/wav");
+        assert!(verbatim_body.get("generation_config").is_none());
+        let verbatim_instruction = verbatim_body["system_instruction"]
+            .as_str()
+            .expect("system_instruction should be a string");
+        assert!(verbatim_instruction.contains("Transcribe the audio verbatim"));
+        assert!(verbatim_instruction.contains("Keep filler words"));
+        assert!(!verbatim_instruction.contains("The spoken language is"));
+        assert!(!verbatim_instruction.contains("Vocabulary and style hints"));
+        assert_eq!(verbatim_body["input"][0]["mime_type"], "audio/wav");
+        assert_eq!(verbatim_body["store"], false);
+    }
+
+    #[test]
+    fn gemini_multimodal_body_applies_extra_params() {
+        let mut provider = gemini_provider("smart");
+        provider.model = "gemini-3.5-flash-lite".into();
+        provider.extra_params.push(KeyValue {
+            key: "generation_config.thinking_level".into(),
+            value: "minimal".into(),
+        });
+        let body = gemini_transcription_body(&provider, &Vars::new(), "QUJD".into(), "audio/wav");
+        assert_eq!(body["generation_config"]["thinking_level"], "minimal");
+        assert!(body["generation_config"].get("transcription_config").is_none());
+    }
+
+    #[test]
+    fn gemini_transcript_ignores_thought_steps_and_reads_model_output() {
+        let body = r#"{
+            "status": "completed",
+            "steps": [
+                {"type": "user_input", "content": [{"type": "audio"}]},
+                {"type": "thought", "content": [{"type": "text", "text": "Let me listen carefully."}]},
+                {"type": "model_output", "content": [
+                    {"type": "thought", "text": "Internal reasoning"},
+                    {"type": "text", "text": "Hello "},
+                    {"type": "text", "text": "from Gemini."}
+                ]}
+            ]
+        }"#;
+        assert_eq!(gemini_transcript(body).as_deref(), Some("Hello from Gemini."));
+
+        let fallback = r#"{"steps":[{"type":"thought","content":[{"type":"text","text":"thinking"}]}],"output_text":"Fallback transcript."}"#;
+        assert_eq!(
+            gemini_transcript(fallback).as_deref(),
+            Some("Fallback transcript.")
+        );
+    }
+
+    fn model_options(ids: &[&str]) -> Vec<ModelOption> {
+        ids.iter()
+            .map(|id| ModelOption {
+                id: (*id).into(),
+                name: (*id).into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filter_transcription_models_for_gemini_keeps_unary_audio_models() {
+        let models = model_options(&[
+            "gemini-3.5-transcribe",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.8-flash",
+            "gemini-4-hydrogen",
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-transcribe-live",
+            "gemini-3.8-live",
+            "gemini-3.8-flash-tts",
+            "gemini-3.1-flash-image",
+            "gemini-embedding-2",
+            "gemma-4-31b-it",
+        ]);
+        let filtered: Vec<String> = filter_transcription_models("gemini", models)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(
+            filtered,
+            vec![
+                "gemini-3.5-transcribe",
+                "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite",
+                "gemini-3-flash-preview",
+                "gemini-3.8-flash",
+                "gemini-4-hydrogen",
+                "gemini-3.1-pro-preview",
+            ]
+        );
+
+        let fallback = filter_transcription_models(
+            "gemini",
+            model_options(&["gemini-embedding-2", "gemma-4-31b-it"]),
+        );
+        assert_eq!(fallback.len(), 2);
+    }
+
+    #[test]
+    fn filter_transcription_models_for_openai_and_groq_keeps_speech_models() {
+        let groq_models = model_options(&[
+            "llama-3.3-70b-versatile",
+            "whisper-large-v3-turbo",
+            "whisper-large-v3",
+        ]);
+        let groq_ids: Vec<String> = filter_transcription_models("groq", groq_models)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(groq_ids, vec!["whisper-large-v3-turbo", "whisper-large-v3"]);
+
+        let openai_models = model_options(&[
+            "gpt-4o",
+            "gpt-4o-mini-transcribe",
+            "whisper-1",
+            "nova-3",
+        ]);
+        let openai_ids: Vec<String> = filter_transcription_models("openai", openai_models)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(
+            openai_ids,
+            vec!["gpt-4o-mini-transcribe", "whisper-1", "nova-3"]
+        );
     }
 
     #[test]

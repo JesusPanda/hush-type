@@ -51,9 +51,17 @@ export interface ProviderSettings {
 
 export type TranscribeMode = "smart" | "verbatim";
 
-/** True when the speech stage uses HushType's built-in Gemini 3.5 Transcribe request. */
+/** True when the model ID is a dedicated Gemini Transcribe model (uses transcription_config). */
+export const isGeminiTranscribeModel = (model: string) =>
+  model.trim().toLowerCase().includes("transcribe");
+
+/** True when the speech stage uses HushType's built-in Gemini Interactions request. */
 export const isNativeGeminiSpeech = (value: ProviderSettings, stage: PipelineStage) =>
   stage === "transcription" && value.provider === "gemini" && value.format === "openai";
+
+/** True when the speech stage uses a dedicated Gemini Transcribe model (Smart/Direct + custom_vocabulary). */
+export const isGeminiDedicatedTranscribe = (value: ProviderSettings, stage: PipelineStage) =>
+  isNativeGeminiSpeech(value, stage) && isGeminiTranscribeModel(value.model);
 
 export interface DictationProfile {
   id: string;
@@ -401,16 +409,35 @@ export const providerDefaults = (id: ProviderId, stage: PipelineStage) => {
   return defaults ? cloneProvider(defaults) : undefined;
 };
 
-/** Models offered in the picker when a provider has no models endpoint. */
-export const SUGGESTED_MODELS: Partial<Record<ProviderId, ModelOption[]>> = {  "azure-speech": [
-    { id: "MAI-Transcribe-2", name: "MAI-Transcribe-2 · 60 languages" },
-    { id: "MAI-Transcribe-1.5", name: "MAI-Transcribe-1.5" },
-  ],
-  "azure-openai": [
-    { id: "gpt-4o-transcribe", name: "Your deployment name" },
-    { id: "gpt-4o-mini-transcribe", name: "Your deployment name" },
-  ],
+/** Curated models offered at the top of the picker for a provider and stage. */
+export const SUGGESTED_MODELS: Partial<Record<ProviderId, Partial<Record<PipelineStage, ModelOption[]>>>> = {
+  gemini: {
+    transcription: [
+      { id: "gemini-3.5-transcribe", name: "Gemini 3.5 Transcribe · 2.6% WER · dedicated STT (low RPD)" },
+      { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash-Lite · 500 RPD free · newest Flash-Lite" },
+      { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash-Lite · 3.4% WER · 500 RPD free, 82× speed" },
+      { id: "gemini-3-flash-preview", name: "Gemini 3 Flash · 2.9% WER · top benchmarked Flash STT" },
+      { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash · latest Gemini 3 Flash, higher paid RPD" },
+      { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen · newest fast Gemini 4, higher paid RPD" },
+      { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro · 2.8% WER · best general STT (paid)" },
+    ],
+  },
+  "azure-speech": {
+    transcription: [
+      { id: "MAI-Transcribe-2", name: "MAI-Transcribe-2 · 60 languages" },
+      { id: "MAI-Transcribe-1.5", name: "MAI-Transcribe-1.5" },
+    ],
+  },
+  "azure-openai": {
+    transcription: [
+      { id: "gpt-4o-transcribe", name: "Your deployment name" },
+      { id: "gpt-4o-mini-transcribe", name: "Your deployment name" },
+    ],
+  },
 };
+
+export const suggestedModelsFor = (provider: ProviderId, stage: PipelineStage): ModelOption[] =>
+  SUGGESTED_MODELS[provider]?.[stage] ?? [];
 
 export interface TemplatePreset {
   id: string;
@@ -422,6 +449,36 @@ export interface TemplatePreset {
 /** Starting points for the custom request editor. Applying one only replaces the request; see applyTemplatePreset. */
 export const TEMPLATE_PRESETS: Record<PipelineStage, TemplatePreset[]> = {
   transcription: [
+    {
+      id: "gemini-generate-content",
+      label: "Google Gemini · generateContent audio",
+      description: "Multimodal Gemini audio transcription via generateContent (inline_data).",
+      settings: {
+        provider: "gemini",
+        endpoint: "https://generativelanguage.googleapis.com/v1beta/models/{{model}}:generateContent",
+        modelsEndpoint: "https://generativelanguage.googleapis.com/v1beta/models",
+        model: "gemini-3.5-flash-lite",
+        template: {
+          method: "POST",
+          url: "{{endpoint}}",
+          headers: [{ key: "x-goog-api-key", value: "{{api_key}}" }],
+          bodyType: "json",
+          fields: [],
+          body: `{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        { "text": "Transcribe the following audio accurately. Return only the transcript. {{prompt}}" },
+        { "inline_data": { "mime_type": "{{mime_type}}", "data": "{{audio_base64}}" } }
+      ]
+    }
+  ]
+}`,
+          responsePath: "candidates.0.content.parts.0.text",
+        },
+      },
+    },
     {
       id: "mai-clean",
       label: "Microsoft MAI-Transcribe · clean",
