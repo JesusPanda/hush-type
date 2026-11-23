@@ -68,6 +68,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Run Rust unit tests
+        run: npm run build && cargo test --locked --manifest-path src-tauri/Cargo.toml
+
       - name: Validate source property lists
         shell: bash
         run: |

@@ -313,8 +313,8 @@ function Sidebar({
           {updateMessage && (updateStatus === "error" || updateStatus === "installed") && (
             <p className={`update-banner-msg ${updateStatus === "error" ? "error" : ""}`}>{updateMessage}</p>
           )}
-          <button type="button" className="update-banner-cta" onClick={onInstallUpdate} disabled={updateStatus === "installing"}>
-            {updateStatus === "installing" ? <><span className="spinner small" /> Installing…</> : "Update"}
+          <button type="button" className="update-banner-cta" onClick={onInstallUpdate} disabled={updateStatus === "checking" || updateStatus === "installing"}>
+            {updateStatus === "installing" ? <><span className="spinner small" /> Working…</> : updateInfo.assetName ? "Update" : "View release"}
           </button>
         </div>
       )}
@@ -743,7 +743,7 @@ function GeneralView({
   const statusText = updateStatus === "checking"
     ? "Checking…"
     : updateStatus === "installing"
-      ? "Downloading installer…"
+      ? updateInfo?.assetName ? "Preparing installer…" : "Opening release…"
       : updateStatus === "installed"
         ? updateMessage || "Installer started."
         : updateStatus === "error"
@@ -790,14 +790,14 @@ function GeneralView({
           <div className="update-row-main">
             <div>
               <strong>Updates <span className="update-version">v{currentVersion}</span></strong>
-              <small className={`update-status ${statusTone}`}>{statusText}</small>
+              <small className={`update-status ${statusTone}`} role="status">{statusText}</small>
             </div>
             <div className="update-actions">
               {updateInfo?.updateAvailable && (
                 <>
                   <button type="button" className="primary" onClick={onInstallUpdate} disabled={updateStatus === "installing" || updateStatus === "checking"}>
                     {updateStatus === "installing" ? <span className="spinner small" /> : <Download size={13} />}
-                    {updateStatus === "installing" ? "Downloading…" : "Download & install"}
+                    {updateStatus === "installing" ? "Working…" : updateInfo.assetName ? "Download & install" : "View release"}
                   </button>
                   <button type="button" onClick={() => void openExternalUrl(updateInfo.releaseUrl)}>
                     <ExternalLink size={13} />
@@ -848,6 +848,7 @@ export default function App() {
   const lastSaved = useRef("");
   const sessionRef = useRef(0);
   const startupCheckedRef = useRef(false);
+  const updateInProgress = useRef(false);
   // Source of truth for the recording lifecycle. React state lags a render behind, so a
   // second hotkey press arriving mid-transition must be judged against this ref instead.
   const phaseRef = useRef<Phase>("idle");
@@ -867,10 +868,10 @@ export default function App() {
   }, []);
 
   const handleCheckUpdates = useCallback(async (silent = false) => {
-    if (!silent) {
-      setUpdateStatus("checking");
-      setUpdateMessage("");
-    }
+    if (updateInProgress.current) return;
+    updateInProgress.current = true;
+    setUpdateStatus("checking");
+    setUpdateMessage("");
     try {
       const result = await checkForUpdates();
       if (result) {
@@ -879,16 +880,18 @@ export default function App() {
       } else if (!silent) {
         setUpdateMessage("Update checks require the desktop app.");
       }
-      if (!silent) setUpdateStatus("idle");
+      setUpdateStatus("idle");
     } catch (cause) {
-      if (silent) return;
-      setUpdateStatus("error");
-      setUpdateMessage(cause instanceof Error ? cause.message : String(cause));
+      setUpdateStatus(silent ? "idle" : "error");
+      if (!silent) setUpdateMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      updateInProgress.current = false;
     }
   }, []);
 
   const handleInstallUpdate = useCallback(async () => {
-    if (!updateInfo) return;
+    if (!updateInfo?.updateAvailable || updateInProgress.current) return;
+    updateInProgress.current = true;
     setUpdateStatus("installing");
     setUpdateMessage("");
     try {
@@ -898,6 +901,8 @@ export default function App() {
     } catch (cause) {
       setUpdateStatus("error");
       setUpdateMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      updateInProgress.current = false;
     }
   }, [updateInfo]);
 

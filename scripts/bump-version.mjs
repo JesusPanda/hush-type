@@ -11,12 +11,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/;
+const VERSION_RE = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 function parseVersion(raw) {
-  const match = SEMVER_RE.exec(String(raw).trim());
+  const match = VERSION_RE.exec(String(raw).trim());
   if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  const version = match.slice(1).map(Number);
+  return version.every(Number.isSafeInteger) ? version : null;
 }
 
 function compareVersions(a, b) {
@@ -62,16 +63,16 @@ function existingTags(root) {
 
 function resolveTargetVersion(currentStr, tags, mode, explicitTag) {
   if (explicitTag) {
-    const stripped = explicitTag.replace(/^v/, "").trim();
-    if (!parseVersion(stripped)) {
-      throw new Error(`Explicit tag "${explicitTag}" is not a valid semver tag`);
+    const version = parseVersion(explicitTag);
+    if (!version || explicitTag !== `v${formatVersion(version)}`) {
+      throw new Error(`Release tag "${explicitTag}" must use vMAJOR.MINOR.PATCH`);
     }
-    return stripped;
+    return formatVersion(version);
   }
 
   const current = parseVersion(currentStr);
   if (!current) {
-    throw new Error(`Current package.json version "${currentStr}" is not valid semver`);
+    throw new Error(`Current package.json version "${currentStr}" must use MAJOR.MINOR.PATCH`);
   }
 
   const parsedTags = tags
@@ -152,7 +153,7 @@ function syncVersionFiles(root, targetVersion, dryRun) {
     (text) => {
       const updated = text.replace(
         /(\[package\][\s\S]*?^version\s*=\s*")[^"]+(")/m,
-        `$1${targetVersion}$2`,
+        (_, prefix, suffix) => `${prefix}${targetVersion}${suffix}`,
       );
       if (updated === text && !text.includes(`version = "${targetVersion}"`)) {
         throw new Error("Could not locate [package] version in src-tauri/Cargo.toml");
@@ -168,7 +169,7 @@ function syncVersionFiles(root, targetVersion, dryRun) {
       cargoLockPath,
       (text) => text.replace(
         /(name\s*=\s*"hush-type"\r?\nversion\s*=\s*")[^"]+(")/,
-        `$1${targetVersion}$2`,
+        (_, prefix, suffix) => `${prefix}${targetVersion}${suffix}`,
       ),
       dryRun,
     ) || changed;

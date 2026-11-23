@@ -99,7 +99,6 @@ export interface UpdateInfo {
   releaseNotes: string;
   releaseUrl: string;
   assetName?: string | null;
-  downloadUrl?: string | null;
 }
 
 export interface HistoryItem {

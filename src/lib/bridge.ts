@@ -174,9 +174,7 @@ export async function installUpdate(update: UpdateInfo): Promise<string> {
     return "Opened release page.";
   }
   return invoke<string>("install_update", {
-    downloadUrl: update.downloadUrl ?? null,
-    assetName: update.assetName ?? null,
-    releaseUrl: update.releaseUrl,
+    expectedVersion: update.latestVersion,
   });
 }
 

@@ -7,7 +7,14 @@ use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet, fs, path::PathBuf, str::FromStr, sync::Mutex, thread, time::Duration,
+    collections::HashSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Mutex,
+    thread,
+    time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -267,6 +274,7 @@ struct ModelOption {
 struct AppState {
     settings: Mutex<AppSettings>,
     config_dir: PathBuf,
+    update_install: tauri::async_runtime::Mutex<()>,
     /// Most recent recording, kept in memory only so templates can be tested.
     last_audio: Mutex<Option<(Vec<u8>, String)>>,
 }
@@ -1531,7 +1539,7 @@ fn paste_text(text: String) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
     current_version: String,
@@ -1541,58 +1549,41 @@ struct UpdateInfo {
     release_notes: String,
     release_url: String,
     asset_name: Option<String>,
+    #[serde(skip)]
     download_url: Option<String>,
 }
 
-fn is_allowed_github_repo_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix(GITHUB_REPO_PREFIX) else {
-        return false;
-    };
-    if rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return false;
-    }
-    rest.is_empty() || rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#')
+fn parse_release_version(version: &str) -> Result<semver::Version, semver::Error> {
+    semver::Version::parse(version.strip_prefix(['v', 'V']).unwrap_or(version))
 }
 
-fn parse_semver(raw: &str) -> Option<((u64, u64, u64), bool)> {
-    let stripped = raw.trim().trim_start_matches(['v', 'V']);
-    let without_build = stripped.split('+').next()?;
-    let (core, is_prerelease) = match without_build.split_once('-') {
-        Some((core, _)) => (core, true),
-        None => (without_build, false),
-    };
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
-    if parts.next().is_some() {
-        return None;
+fn is_allowed_release_url(url: &str) -> bool {
+    match url.strip_prefix(GITHUB_REPO_PREFIX) {
+        Some("/releases" | "/releases/latest") => true,
+        Some(path) => path
+            .strip_prefix("/releases/tag/")
+            .is_some_and(|tag| parse_release_version(tag).is_ok()),
+        None => false,
     }
-    Some(((major, minor, patch), is_prerelease))
 }
 
-fn is_newer_version(current: &str, candidate: &str) -> bool {
-    let (Some((cur_ver, cur_pre)), Some((cand_ver, cand_pre))) =
-        (parse_semver(current), parse_semver(candidate))
-    else {
-        return false;
-    };
-    if cand_ver != cur_ver {
-        return cand_ver > cur_ver;
-    }
-    cur_pre && !cand_pre
-}
-
-fn select_release_asset(assets: &[Value], os: &str, arch: &str) -> Option<(String, String)> {
+fn select_release_asset(
+    assets: &[Value],
+    tag: &str,
+    os: &str,
+    arch: &str,
+) -> Option<(String, String)> {
+    let prefix = format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/");
     let candidates: Vec<(String, String, String)> = assets
         .iter()
         .filter_map(|asset| {
-            let name = asset.get("name")?.as_str()?.trim();
-            let url = asset.get("browser_download_url")?.as_str()?.trim();
-            if name.is_empty() || !url.starts_with(GITHUB_RELEASE_DOWNLOAD_PREFIX) {
+            let name = safe_update_filename(asset.get("name")?.as_str()?)?;
+            let url = asset.get("browser_download_url")?.as_str()?;
+            if url.strip_prefix(&prefix)? != name {
                 return None;
             }
-            Some((name.to_string(), url.to_string(), name.to_ascii_lowercase()))
+            let lower = name.to_ascii_lowercase();
+            Some((name, url.to_string(), lower))
         })
         .collect();
 
@@ -1605,36 +1596,27 @@ fn select_release_asset(assets: &[Value], os: &str, arch: &str) -> Option<(Strin
 
     match os {
         "macos" => match arch {
-            "aarch64" => pick(&|n| {
-                n.ends_with(".dmg") && (n.contains("aarch64") || n.contains("arm64"))
-            })
-            .or_else(|| pick(&|n| n.ends_with(".dmg") && n.contains("universal")))
-            .or_else(|| {
-                pick(&|n| {
-                    n.ends_with(".dmg")
-                        && !n.contains("x64")
-                        && !n.contains("x86_64")
-                        && !n.contains("intel")
-                })
-            }),
+            "aarch64" => {
+                pick(&|n| n.ends_with(".dmg") && (n.contains("aarch64") || n.contains("arm64")))
+                    .or_else(|| pick(&|n| n.ends_with(".dmg") && n.contains("universal")))
+            }
             "x86_64" => pick(&|n| {
-                n.ends_with(".dmg") && (n.contains("x64") || n.contains("x86_64"))
+                n.ends_with(".dmg")
+                    && (n.contains("x64") || n.contains("x86_64") || n.contains("intel"))
             })
-            .or_else(|| pick(&|n| n.ends_with(".dmg") && n.contains("universal")))
-            .or_else(|| {
-                pick(&|n| {
-                    n.ends_with(".dmg") && !n.contains("aarch64") && !n.contains("arm64")
-                })
-            }),
-            _ => pick(&|n| n.ends_with(".dmg") && n.contains("universal"))
-                .or_else(|| pick(&|n| n.ends_with(".dmg"))),
+            .or_else(|| pick(&|n| n.ends_with(".dmg") && n.contains("universal"))),
+            _ => None,
         },
-        "windows" => pick(&|n| n.ends_with("-setup.exe"))
-            .or_else(|| pick(&|n| n.ends_with(".exe")))
-            .or_else(|| pick(&|n| n.ends_with(".msi"))),
-        "linux" => pick(&|n| n.ends_with(".appimage"))
-            .or_else(|| pick(&|n| n.ends_with(".deb")))
-            .or_else(|| pick(&|n| n.ends_with(".rpm"))),
+        "windows" => {
+            let matches_arch = |n: &str| match arch {
+                "x86_64" => n.contains("_x64") || n.contains("_x86_64"),
+                "aarch64" => n.contains("_arm64") || n.contains("_aarch64"),
+                "x86" => n.contains("_x86") && !n.contains("_x86_64"),
+                _ => false,
+            };
+            pick(&|n| matches_arch(n) && n.ends_with("-setup.exe"))
+                .or_else(|| pick(&|n| matches_arch(n) && n.ends_with(".msi")))
+        }
         _ => None,
     }
 }
@@ -1653,7 +1635,12 @@ fn parse_release_update(
         .map(str::trim)
         .filter(|tag| !tag.is_empty())
         .ok_or_else(|| "The latest GitHub release is missing a version tag.".to_string())?;
-    let latest_version = tag_name.trim_start_matches(['v', 'V']).to_string();
+    let latest_version = parse_release_version(tag_name).map_err(|error| {
+        format!("The latest GitHub release has an invalid version tag: {error}")
+    })?;
+    let current = parse_release_version(current_version)
+        .map_err(|error| format!("The installed version is invalid: {error}"))?;
+    let update_available = latest_version.cmp_precedence(&current).is_gt();
     let release_name = value
         .get("name")
         .and_then(Value::as_str)
@@ -1671,7 +1658,7 @@ fn parse_release_update(
         .get("html_url")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|url| is_allowed_github_repo_url(url))
+        .filter(|url| is_allowed_release_url(url))
         .unwrap_or("https://github.com/JesusPanda/hush-type/releases/latest")
         .to_string();
     let assets = value
@@ -1679,14 +1666,13 @@ fn parse_release_update(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let (asset_name, download_url) = match select_release_asset(assets, os, arch) {
+    let (asset_name, download_url) = match select_release_asset(assets, tag_name, os, arch) {
         Some((name, url)) => (Some(name), Some(url)),
         None => (None, None),
     };
-    let update_available = is_newer_version(current_version, &latest_version);
     Ok(UpdateInfo {
         current_version: current_version.to_string(),
-        latest_version,
+        latest_version: latest_version.to_string(),
         update_available,
         release_name,
         release_notes,
@@ -1697,38 +1683,27 @@ fn parse_release_update(
 }
 
 fn safe_update_filename(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty()
-        || trimmed == "."
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains("..")
-        || trimmed.contains('\0')
+    if name.is_empty()
+        || name.starts_with('.')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
     {
         return None;
     }
-    let path = std::path::Path::new(trimmed);
-    let mut components = path.components();
-    match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(file_name)), None)
-            if file_name.to_str() == Some(trimmed) =>
-        {
-            Some(trimmed.to_string())
-        }
-        _ => None,
-    }
+    Some(name.to_string())
 }
 
 fn open_url_in_browser(url: &str) -> Result<(), String> {
     let trimmed = url.trim();
-    if !is_allowed_github_repo_url(trimmed) {
+    if !is_allowed_release_url(trimmed) {
         return Err("Refused to open an unrecognized URL.".into());
     }
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(trimmed).spawn();
     #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("cmd")
-        .args(["/C", "start", "", trimmed])
+    let result = std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", trimmed])
         .spawn();
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let result = std::process::Command::new("xdg-open").arg(trimmed).spawn();
@@ -1781,107 +1756,130 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
     )
 }
 
+async fn download_installer(url: &str, dest: &Path) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let url = attempt.url();
+            if attempt.previous().len() < 5
+                && url.scheme() == "https"
+                && url.port().is_none()
+                && matches!(
+                    url.host_str(),
+                    Some("release-assets.githubusercontent.com" | "objects.githubusercontent.com")
+                )
+            {
+                attempt.follow()
+            } else {
+                attempt.error("unrecognized GitHub release asset redirect")
+            }
+        }))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut response = client
+        .get(url)
+        .header("User-Agent", format!("HushType/{APP_VERSION}"))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| format!("Could not download the update: {error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|error| format!("Could not create the installer file: {error}"))?;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Could not read the downloaded installer: {error}"))?
+    {
+        file.write_all(&chunk)
+            .map_err(|error| format!("Could not save the downloaded installer: {error}"))?;
+    }
+    if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
+        return Err("GitHub returned an empty installer.".into());
+    }
+    Ok(())
+}
+
+fn launch_installer(app: &AppHandle, dest: &Path) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        let status = std::process::Command::new("open")
+            .arg(dest)
+            .status()
+            .map_err(|error| format!("Could not open the installer: {error}"))?;
+        if !status.success() {
+            return Err(format!("Could not open the installer ({status})."));
+        }
+        Ok("Installer opened. Quit HushType, then drag the new version to Applications.".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let is_msi = dest
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"));
+        if is_msi {
+            std::process::Command::new("msiexec.exe")
+                .arg("/i")
+                .arg(dest)
+                .spawn()
+        } else {
+            std::process::Command::new(dest).spawn()
+        }
+        .map_err(|error| format!("Could not launch the installer: {error}"))?;
+        let app = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            app.exit(0);
+        });
+        Ok("Installer launched. HushType will close so the update can finish.".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, dest);
+        Err("This platform requires a manual update from GitHub Releases.".into())
+    }
+}
+
 #[tauri::command]
 async fn install_update(
     app: AppHandle,
-    download_url: Option<String>,
-    asset_name: Option<String>,
-    release_url: String,
+    state: State<'_, AppState>,
+    expected_version: String,
 ) -> Result<String, String> {
-    #[cfg(not(target_os = "windows"))]
-    let _ = &app;
-
-    let release_url = release_url.trim();
-    if !is_allowed_github_repo_url(release_url) {
-        return Err("Refused to install an update from an unrecognized URL.".into());
+    let _install = state
+        .update_install
+        .try_lock()
+        .map_err(|_| "An update is already downloading.".to_string())?;
+    let update = check_for_updates().await?;
+    if !update.update_available || update.latest_version != expected_version {
+        return Err("The latest release has changed. Check for updates again.".into());
     }
+    let (Some(url), Some(file_name)) = (update.download_url, update.asset_name) else {
+        open_url_in_browser(&update.release_url)?;
+        return Ok("Opened the GitHub Release page in your browser.".into());
+    };
 
-    let download_url = download_url
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let asset_name = asset_name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    if let (Some(download_url), Some(asset_name)) = (download_url, asset_name) {
-        if !download_url.starts_with(GITHUB_RELEASE_DOWNLOAD_PREFIX) {
-            return Err("Refused to download an installer from an unrecognized URL.".into());
-        }
-        let file_name = safe_update_filename(&asset_name)
-            .ok_or_else(|| "The update file name is invalid.".to_string())?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|error| error.to_string())?;
-        let response = client
-            .get(&download_url)
-            .header("User-Agent", format!("HushType/{APP_VERSION}"))
-            .send()
-            .await
-            .map_err(|error| format!("Could not download the update: {error}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("Could not download the update ({status})."));
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| format!("Could not read the downloaded installer: {error}"))?;
-
-        let dir = std::env::temp_dir().join("hushtype-updates");
-        fs::create_dir_all(&dir)
-            .map_err(|error| format!("Could not create the updates folder: {error}"))?;
-        let dest = dir.join(&file_name);
-        let part = dir.join(format!("{file_name}.part"));
-        fs::write(&part, &bytes)
-            .map_err(|error| format!("Could not save the downloaded installer: {error}"))?;
-        if dest.exists() {
-            let _ = fs::remove_file(&dest);
-        }
-        fs::rename(&part, &dest)
-            .map_err(|error| format!("Could not finalize the downloaded installer: {error}"))?;
-
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .arg(&dest)
-                .spawn()
-                .map_err(|error| format!("Could not open the installer: {error}"))?;
-            Ok(
-                "Downloaded and opened the installer. Drag HushType to Applications to finish updating."
-                    .into(),
-            )
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if file_name.to_ascii_lowercase().ends_with(".msi") {
-                std::process::Command::new("msiexec")
-                    .arg("/i")
-                    .arg(&dest)
-                    .spawn()
-            } else {
-                std::process::Command::new(&dest).spawn()
-            }
-            .map_err(|error| format!("Could not launch the installer: {error}"))?;
-            let app_handle = app.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(400));
-                app_handle.exit(0);
-            });
-            Ok("Installer launched. HushType will close so the update can finish.".into())
-        }
-        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-        {
-            std::process::Command::new("xdg-open")
-                .arg(&dest)
-                .spawn()
-                .map_err(|error| format!("Could not open the installer: {error}"))?;
-            Ok("Downloaded and opened the installer.".into())
-        }
-    } else {
-        open_url_in_browser(release_url)?;
-        Ok("Opened the GitHub Release page in your browser.".into())
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cache)
+        .map_err(|error| format!("Could not create the update cache: {error}"))?;
+    let dir = cache.join(format!("update-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&dir)
+        .map_err(|error| format!("Could not create the installer folder: {error}"))?;
+    let dest = dir.join(file_name);
+    let result = download_installer(&url, &dest)
+        .await
+        .and_then(|()| launch_installer(&app, &dest));
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
     }
+    result
 }
 
 #[tauri::command]
@@ -1932,6 +1930,7 @@ pub fn run() {
                 settings: Mutex::new(settings.clone()),
                 config_dir,
                 last_audio: Mutex::new(None),
+                update_install: tauri::async_runtime::Mutex::new(()),
             });
             if let Err(error) = register_shortcuts(&app.handle(), &settings) {
                 eprintln!("{error}");
@@ -2317,20 +2316,26 @@ mod tests {
 
     #[test]
     fn semver_comparison_detects_newer_versions() {
-        assert!(is_newer_version("0.3.2", "0.3.3"));
-        assert!(is_newer_version("0.3.2", "0.4.0"));
-        assert!(is_newer_version("0.3.2", "1.0.0"));
-        assert!(is_newer_version("v0.3.2", "V0.3.3"));
-        assert!(is_newer_version("0.3.2+build.1", "0.3.3+build.2"));
-        assert!(is_newer_version("0.4.0-beta.1", "0.4.0"));
-        assert!(is_newer_version("0.3.2", "0.4.0-rc.1"));
-
-        assert!(!is_newer_version("0.3.2", "0.3.2"));
-        assert!(!is_newer_version("0.3.2", "v0.3.2"));
-        assert!(!is_newer_version("0.3.2", "0.3.1"));
-        assert!(!is_newer_version("0.4.0", "0.3.9"));
-        assert!(!is_newer_version("0.4.0", "0.4.0-rc.1"));
-        assert!(!is_newer_version("0.3.2", "invalid"));
+        for (current, candidate, available) in [
+            ("0.3.2", "0.3.3", true),
+            ("0.3.2", "1.0.0", true),
+            ("v0.3.2", "V0.3.3", true),
+            ("0.4.0-beta.9", "0.4.0-beta.10", true),
+            ("0.4.0-beta.1", "0.4.0", true),
+            ("0.3.2+build.1", "0.3.2+build.2", false),
+            ("0.4.0", "0.3.9", false),
+            ("0.4.0", "0.4.0-rc.1", false),
+        ] {
+            let body = json!({ "tag_name": candidate }).to_string();
+            let update = parse_release_update(&body, current, "macos", "aarch64").unwrap();
+            assert_eq!(
+                update.update_available, available,
+                "{current} -> {candidate}"
+            );
+        }
+        assert!(
+            parse_release_update(r#"{"tag_name":"invalid"}"#, "0.3.2", "macos", "aarch64").is_err()
+        );
     }
 
     #[test]
@@ -2368,32 +2373,37 @@ mod tests {
         ];
 
         assert_eq!(
-            select_release_asset(&assets, "macos", "aarch64"),
+            select_release_asset(&assets, "v0.4.0", "macos", "aarch64"),
             Some((
                 "HushType_0.4.0_aarch64.dmg".into(),
                 format!("{base}/HushType_0.4.0_aarch64.dmg")
             ))
         );
         assert_eq!(
-            select_release_asset(&assets, "macos", "x86_64"),
+            select_release_asset(&assets, "v0.4.0", "macos", "x86_64"),
             Some((
                 "HushType_0.4.0_x64.dmg".into(),
                 format!("{base}/HushType_0.4.0_x64.dmg")
             ))
         );
         assert_eq!(
-            select_release_asset(&assets, "windows", "x86_64"),
+            select_release_asset(&assets, "v0.4.0", "windows", "x86_64"),
             Some((
                 "HushType_0.4.0_x64-setup.exe".into(),
                 format!("{base}/HushType_0.4.0_x64-setup.exe")
             ))
         );
         assert_eq!(
-            select_release_asset(&assets, "linux", "x86_64"),
-            Some((
-                "HushType_0.4.0_amd64.AppImage".into(),
-                format!("{base}/HushType_0.4.0_amd64.AppImage")
-            ))
+            select_release_asset(&assets, "v0.4.0", "linux", "x86_64"),
+            None
+        );
+        assert_eq!(
+            select_release_asset(&assets, "v0.4.0", "windows", "aarch64"),
+            None
+        );
+        assert_eq!(
+            select_release_asset(&assets, "v0.5.0", "macos", "x86_64"),
+            None
         );
 
         let msi_only = vec![json!({
@@ -2401,7 +2411,7 @@ mod tests {
             "browser_download_url": format!("{base}/HushType_0.4.0_x64_en-US.msi")
         })];
         assert_eq!(
-            select_release_asset(&msi_only, "windows", "x86_64"),
+            select_release_asset(&msi_only, "v0.4.0", "windows", "x86_64"),
             Some((
                 "HushType_0.4.0_x64_en-US.msi".into(),
                 format!("{base}/HushType_0.4.0_x64_en-US.msi")
@@ -2412,7 +2422,10 @@ mod tests {
             "name": "HushType_0.4.0_aarch64.dmg",
             "browser_download_url": "https://github.com/other/repo/releases/download/v0.4.0/HushType_0.4.0_aarch64.dmg"
         })];
-        assert_eq!(select_release_asset(&untrusted_only, "macos", "aarch64"), None);
+        assert_eq!(
+            select_release_asset(&untrusted_only, "v0.4.0", "macos", "aarch64"),
+            None
+        );
     }
 
     #[test]
