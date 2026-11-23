@@ -110,8 +110,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          RELEASES=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")
-          MATCHING=$(jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' <<< "$RELEASES")
+          MATCHING=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -sc --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]')
           if jq -e 'any(.[]; .draft == false)' <<< "$MATCHING" > /dev/null; then
             echo "${TAG} is already published."
             exit 0
