@@ -32,6 +32,7 @@ You can add, rename, duplicate by configuration, or delete modes. Every mode own
 - API keys stored in Windows Credential Manager or macOS Keychain
 - Tray/menu-bar process so shortcuts keep working when the main window is closed
 - Configurable models, endpoints, language, cleanup prompt, and shortcuts
+- Automatic startup update checks with 1-click installer download from GitHub Releases
 
 ## Quick start
 

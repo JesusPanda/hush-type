@@ -9,6 +9,7 @@ import type {
   ProviderTestResult,
   RecordingState,
   TranscriptionResult,
+  UpdateInfo,
 } from "../types";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -160,4 +161,29 @@ export async function requestOverlayCancel(): Promise<void> {
 export async function startOverlayDrag(): Promise<void> {
   if (!isTauri()) return;
   await invoke("start_overlay_drag");
+}
+
+export async function checkForUpdates(): Promise<UpdateInfo | null> {
+  if (!isTauri()) return null;
+  return invoke<UpdateInfo>("check_for_updates");
+}
+
+export async function installUpdate(update: UpdateInfo): Promise<string> {
+  if (!isTauri()) {
+    window.open(update.releaseUrl, "_blank", "noopener,noreferrer");
+    return "Opened release page.";
+  }
+  return invoke<string>("install_update", {
+    downloadUrl: update.downloadUrl ?? null,
+    assetName: update.assetName ?? null,
+    releaseUrl: update.releaseUrl,
+  });
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isTauri()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await invoke("open_external_url", { url });
 }
