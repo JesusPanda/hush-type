@@ -1,30 +1,197 @@
 name: Release desktop apps
 
 on:
-  workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump mode (auto bumps patch if the current version tag already exists)"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - none
+      prerelease:
+        description: "Mark GitHub Release as a prerelease"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-apps
+  cancel-in-progress: false
 
 jobs:
-  release:
-    permissions:
-      contents: write
+  prepare:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    if: >-
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        (
+          startsWith(github.event.head_commit.message, 'chore: release v') ||
+          contains(github.event.head_commit.message, '[skip release]')
+        )
+      )
+    outputs:
+      should_release: ${{ steps.gate.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check whether this push should build a release
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" != "push" || "${{ github.ref_type }}" == "tag" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED_FILES=$(git diff --name-only "$BEFORE" "$AFTER")
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -qE '^(src/|src-tauri/|index\.html$|package\.json$|package-lock\.json$|vite\.config\.ts$|tsconfig(\.node)?\.json$|scripts/bump-version\.mjs$|\.github/workflows/release\.yml$)'; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No application or release pipeline files changed; skipping release build."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.gate.outputs.should_release == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Resolve and sync app version
+        id: version
+        if: steps.gate.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            RESULT=$(node scripts/bump-version.mjs --tag "${{ github.ref_name }}")
+          else
+            BUMP_MODE="${{ inputs.bump || 'auto' }}"
+            RESULT=$(node scripts/bump-version.mjs --mode "$BUMP_MODE")
+          fi
+
+          VERSION=$(node -e 'const r = JSON.parse(process.argv[1]); console.log(r.version);' "$RESULT")
+          TAG=$(node -e 'const r = JSON.parse(process.argv[1]); console.log(r.tag);' "$RESULT")
+          CHANGED=$(node -e 'const r = JSON.parse(process.argv[1]); console.log(r.changed);' "$RESULT")
+
+          if [[ "$CHANGED" == "true" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+            git commit -m "chore: release ${TAG} [skip ci]"
+            git push origin HEAD:main
+          fi
+
+          SHA=$(git rev-parse HEAD)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Prepared ${TAG} at ${SHA} (changed=${CHANGED})"
+
+      - name: Create or reuse draft GitHub Release
+        id: release
+        if: steps.gate.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.version.outputs.tag }}"
+          SHA="${{ steps.version.outputs.sha }}"
+          PRERELEASE="${{ inputs.prerelease || false }}"
+
+          # Remove any stale draft release for the same tag so retries start clean.
+          STALE_DRAFT_ID=$(gh api "repos/${{ github.repository }}/releases?per_page=30" \
+            --jq ".[] | select(.draft == true and .tag_name == \"${TAG}\") | .id" | head -n 1 || true)
+          if [[ -n "$STALE_DRAFT_ID" ]]; then
+            gh api --method DELETE "repos/${{ github.repository }}/releases/${STALE_DRAFT_ID}"
+          fi
+
+          # If a published release already exists (e.g., manual tag rebuild), upload into it.
+          EXISTING_ID=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' 2>/dev/null || true)
+          if [[ -n "$EXISTING_ID" ]]; then
+            echo "release_id=${EXISTING_ID}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BODY=$'Cross-platform HushType desktop installers.\n\nmacOS builds use an ad-hoc signature and are not notarized. If macOS blocks the first launch, approve HushType in System Settings > Privacy & Security.'
+
+          RELEASE_ID=$(gh api --method POST "repos/${{ github.repository }}/releases" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$SHA" \
+            -f name="HushType ${TAG}" \
+            -f body="$BODY" \
+            -F draft=true \
+            -F prerelease="$PRERELEASE" \
+            -F generate_release_notes=true \
+            --jq '.id')
+
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.label }})
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          - label: Windows x64
+            platform: windows-latest
             args: ""
-          - platform: macos-latest
+            run_tests: true
+          - label: macOS Apple Silicon
+            platform: macos-latest
             args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
+            run_tests: true
+          - label: macOS Intel
+            platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            run_tests: false
 
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out prepared commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -45,18 +212,41 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish HushType
+      - name: Type-check frontend
+        run: npm run check
+
+      - name: Run Rust unit tests
+        if: ${{ matrix.run_tests }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build and upload HushType installers
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: "v__VERSION__"
-          releaseName: "HushType v__VERSION__"
-          releaseBody: |
-            Cross-platform HushType desktop installers.
-
-            macOS builds use an ad-hoc signature and are not notarized. If macOS blocks the first launch, approve HushType in System Settings > Privacy & Security.
-          releaseDraft: false
-          prerelease: false
-          generateReleaseNotes: true
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          URL=$(gh api --method PATCH "repos/${{ github.repository }}/releases/${{ needs.prepare.outputs.release_id }}" \
+            -F draft=false \
+            --jq '.html_url')
+
+          {
+            echo "### Published HushType ${{ needs.prepare.outputs.tag }}"
+            echo ""
+            echo "Release URL: ${URL}"
+          } >> "$GITHUB_STEP_SUMMARY"

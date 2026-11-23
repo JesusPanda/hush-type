@@ -96,7 +96,7 @@ npm run tauri build
 
 Tauri does not cross-compile a macOS `.app` from Windows; run the same command on a Mac for that artifact. Apple distribution outside your own machine may require signing and notarization.
 
-Version tags matching `v*` trigger the GitHub release workflow. It builds Windows x64 installers and macOS installers for both Apple Silicon and Intel, then attaches them to the matching GitHub Release.
+Pushes to `main` that touch application code automatically bump the patch version (if the current version tag already exists), run checks and unit tests, build Windows x64 and macOS (Apple Silicon + Intel) installers, and publish a GitHub Release with all installers attached. You can also trigger a `minor`, `major`, or prerelease build manually from **Actions → Release desktop apps**, or push a `v*` tag directly. Add `[skip release]` to a commit message on `main` to skip an automatic release.
 
 ## Permissions
 
