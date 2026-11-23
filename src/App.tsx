@@ -4,6 +4,8 @@ import {
   ChevronDown,
   CircleAlert,
   Copy,
+  Download,
+  ExternalLink,
   FolderOpen,
   History,
   Mic,
@@ -17,17 +19,21 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import pkg from "../package.json";
 import { ExtraParamsEditor, TemplateEditor, TestPanel } from "./components/RequestEditor";
 import { Capsule } from "./components/Capsule";
 import { useRecorder } from "./hooks/useRecorder";
 import { useMicrophoneLevel } from "./hooks/useMicrophoneLevel";
 import {
+  checkForUpdates,
+  installUpdate,
   listModels,
   loadHistory,
   loadSettings,
   onCancelShortcut,
   onOverlayCancel,
   onShortcut,
+  openExternalUrl,
   pasteText,
   saveFailedRecording,
   saveHistory,
@@ -60,10 +66,12 @@ import {
   type RecordingState,
   type RequestFormat,
   type TranscribeMode,
+  type UpdateInfo,
   type View,
 } from "./types";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type UpdateStatus = "idle" | "checking" | "installing" | "installed" | "error";
 
 const isMac = navigator.platform.includes("Mac");
 
@@ -241,9 +249,30 @@ interface SidebarProps {
   onAddMode: () => void;
   onDeleteMode: (id: string) => void;
   dictate: DictateControlProps;
+  updateInfo: UpdateInfo | null;
+  updateStatus: UpdateStatus;
+  updateMessage: string;
+  updateDismissed: boolean;
+  onInstallUpdate: () => void;
+  onDismissUpdate: () => void;
 }
 
-function Sidebar({ view, settings, historyCount, onView, onSelectMode, onAddMode, onDeleteMode, dictate }: SidebarProps) {
+function Sidebar({
+  view,
+  settings,
+  historyCount,
+  onView,
+  onSelectMode,
+  onAddMode,
+  onDeleteMode,
+  dictate,
+  updateInfo,
+  updateStatus,
+  updateMessage,
+  updateDismissed,
+  onInstallUpdate,
+  onDismissUpdate,
+}: SidebarProps) {
   return (
     <aside className="sidebar">
       <div className="brand"><Logo /><span>HushType</span></div>
@@ -270,6 +299,25 @@ function Sidebar({ view, settings, historyCount, onView, onSelectMode, onAddMode
         <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => onView("history")} aria-current={view === "history" ? "page" : undefined}><History size={15} strokeWidth={1.9} /><span>History</span>{historyCount > 0 && <span className="nav-count">{historyCount}</span>}</button>
         <button className={`nav-item ${view === "general" ? "active" : ""}`} onClick={() => onView("general")} aria-current={view === "general" ? "page" : undefined}><SlidersHorizontal size={15} strokeWidth={1.9} /><span>General</span></button>
       </div>
+      {updateInfo?.updateAvailable && !updateDismissed && (
+        <div className="update-banner" style={pig(dictate.color)}>
+          <div className="update-banner-head">
+            <button type="button" className="update-banner-info" onClick={() => onView("general")} title="View release notes in General">
+              <Download size={13} strokeWidth={2.2} />
+              <span>v{updateInfo.latestVersion} available</span>
+            </button>
+            <button type="button" className="update-banner-dismiss" onClick={onDismissUpdate} title="Dismiss" aria-label="Dismiss update notification">
+              <X size={13} />
+            </button>
+          </div>
+          {updateMessage && (updateStatus === "error" || updateStatus === "installed") && (
+            <p className={`update-banner-msg ${updateStatus === "error" ? "error" : ""}`}>{updateMessage}</p>
+          )}
+          <button type="button" className="update-banner-cta" onClick={onInstallUpdate} disabled={updateStatus === "checking" || updateStatus === "installing"}>
+            {updateStatus === "installing" ? <><span className="spinner small" /> Working…</> : updateInfo.assetName ? "Update" : "View release"}
+          </button>
+        </div>
+      )}
       <div className="sidebar-footer"><DictateControl {...dictate} /></div>
     </aside>
   );
@@ -665,10 +713,53 @@ function ModeView({ settings, saveState, saveError, onSettings, onSaveKey, onDel
 const CAPSULE_PREVIEW_STATES: RecordingState[] = ["recording", "processing", "success", "error"];
 const capsuleStateLabel: Partial<Record<RecordingState, string>> = { recording: "Listening", processing: "Working", success: "Pasted", error: "Failed" };
 
-function GeneralView({ settings, saveState, saveError, onSettings }: { settings: AppSettings; saveState: SaveState; saveError: string; onSettings: (settings: AppSettings) => void }) {
+interface GeneralViewProps {
+  settings: AppSettings;
+  saveState: SaveState;
+  saveError: string;
+  onSettings: (settings: AppSettings) => void;
+  updateInfo: UpdateInfo | null;
+  updateStatus: UpdateStatus;
+  updateMessage: string;
+  onCheckUpdates: () => void;
+  onInstallUpdate: () => void;
+}
+
+function GeneralView({
+  settings,
+  saveState,
+  saveError,
+  onSettings,
+  updateInfo,
+  updateStatus,
+  updateMessage,
+  onCheckUpdates,
+  onInstallUpdate,
+}: GeneralViewProps) {
   const overlaySuccessDurationMs = settings.overlaySuccessDurationMs ?? 650;
   const activeIndex = Math.max(0, settings.profiles.findIndex((item) => item.id === settings.activeProfileId));
   const color = pigmentFor(settings.profiles[activeIndex], activeIndex).hex;
+  const currentVersion = updateInfo?.currentVersion ?? pkg.version;
+  const statusText = updateStatus === "checking"
+    ? "Checking…"
+    : updateStatus === "installing"
+      ? updateInfo?.assetName ? "Preparing installer…" : "Opening release…"
+      : updateStatus === "installed"
+        ? updateMessage || "Installer started."
+        : updateStatus === "error"
+          ? updateMessage || "Couldn't check for updates."
+          : updateInfo?.updateAvailable
+            ? `v${updateInfo.latestVersion} available${updateInfo.releaseName && updateInfo.releaseName !== `v${updateInfo.latestVersion}` ? ` · ${updateInfo.releaseName}` : ""}`
+            : updateInfo
+              ? `Up to date (v${updateInfo.currentVersion})`
+              : updateMessage || "GitHub Releases";
+  const statusTone = updateStatus === "error"
+    ? "error"
+    : updateStatus === "installed"
+      ? "installed"
+      : updateInfo?.updateAvailable
+        ? "available"
+        : "";
   return (
     <main className="page general-page" style={pig(color)}>
       <header className="page-header"><div><h1>General</h1><p>Applies to every mode.</p></div><SaveStatus state={saveState} error={saveError} /></header>
@@ -691,6 +782,42 @@ function GeneralView({ settings, saveState, saveError, onSettings }: { settings:
           <input className="range" type="range" aria-label="Hide after pasting" min="200" max="2500" step="50" value={overlaySuccessDurationMs} disabled={!settings.overlayEnabled} onChange={(event) => onSettings({ ...settings, overlaySuccessDurationMs: Number(event.target.value) })} style={{ "--fill": `${((overlaySuccessDurationMs - 200) / 2300) * 100}%` } as CSSProperties} />
           <div className="range-scale"><span>Faster</span><span>Slower</span></div>
         </div>
+        <label className="setting-row">
+          <div><strong>Check for updates at startup</strong><small>Automatically check GitHub Releases when HushType opens.</small></div>
+          <input type="checkbox" checked={settings.checkUpdatesOnStartup !== false} onChange={(event) => onSettings({ ...settings, checkUpdatesOnStartup: event.target.checked })} />
+        </label>
+        <div className="setting-row update-row">
+          <div className="update-row-main">
+            <div>
+              <strong>Updates <span className="update-version">v{currentVersion}</span></strong>
+              <small className={`update-status ${statusTone}`} role="status">{statusText}</small>
+            </div>
+            <div className="update-actions">
+              {updateInfo?.updateAvailable && (
+                <>
+                  <button type="button" className="primary" onClick={onInstallUpdate} disabled={updateStatus === "installing" || updateStatus === "checking"}>
+                    {updateStatus === "installing" ? <span className="spinner small" /> : <Download size={13} />}
+                    {updateStatus === "installing" ? "Working…" : updateInfo.assetName ? "Download & install" : "View release"}
+                  </button>
+                  <button type="button" onClick={() => void openExternalUrl(updateInfo.releaseUrl)}>
+                    <ExternalLink size={13} />
+                    Release notes
+                  </button>
+                </>
+              )}
+              <button type="button" onClick={onCheckUpdates} disabled={updateStatus === "checking" || updateStatus === "installing"}>
+                <RefreshCw size={13} className={updateStatus === "checking" ? "spinning" : ""} />
+                Check now
+              </button>
+            </div>
+          </div>
+          {updateInfo?.updateAvailable && updateInfo.releaseNotes.trim() && (
+            <details className="update-notes">
+              <summary><span>What's new in v{updateInfo.latestVersion}</span><ChevronDown size={14} /></summary>
+              <pre>{updateInfo.releaseNotes}</pre>
+            </details>
+          )}
+        </div>
       </section>
       <p className="footnote"><span className="status-dot" />Local-first. API keys live in your system keychain, and history never leaves this device.</p>
     </main>
@@ -711,11 +838,17 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState("");
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
+  const [updateMessage, setUpdateMessage] = useState("");
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const recorder = useRecorder();
   const settingsRef = useRef(settings);
   const historyRef = useRef(history);
   const lastSaved = useRef("");
   const sessionRef = useRef(0);
+  const startupCheckedRef = useRef(false);
+  const updateInProgress = useRef(false);
   // Source of truth for the recording lifecycle. React state lags a render behind, so a
   // second hotkey press arriving mid-transition must be judged against this ref instead.
   const phaseRef = useRef<Phase>("idle");
@@ -733,6 +866,53 @@ export default function App() {
       setLoaded(true);
     });
   }, []);
+
+  const handleCheckUpdates = useCallback(async (silent = false) => {
+    if (updateInProgress.current) return;
+    updateInProgress.current = true;
+    setUpdateStatus("checking");
+    setUpdateMessage("");
+    try {
+      const result = await checkForUpdates();
+      if (result) {
+        setUpdateInfo(result);
+        if (result.updateAvailable && !silent) setUpdateDismissed(false);
+      } else if (!silent) {
+        setUpdateMessage("Update checks require the desktop app.");
+      }
+      setUpdateStatus("idle");
+    } catch (cause) {
+      setUpdateStatus(silent ? "idle" : "error");
+      if (!silent) setUpdateMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      updateInProgress.current = false;
+    }
+  }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    if (!updateInfo?.updateAvailable || updateInProgress.current) return;
+    updateInProgress.current = true;
+    setUpdateStatus("installing");
+    setUpdateMessage("");
+    try {
+      const message = await installUpdate(updateInfo);
+      setUpdateStatus("installed");
+      setUpdateMessage(message);
+    } catch (cause) {
+      setUpdateStatus("error");
+      setUpdateMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      updateInProgress.current = false;
+    }
+  }, [updateInfo]);
+
+  useEffect(() => {
+    if (!loaded || startupCheckedRef.current) return;
+    startupCheckedRef.current = true;
+    if (settingsRef.current.checkUpdatesOnStartup !== false) {
+      void handleCheckUpdates(true);
+    }
+  }, [handleCheckUpdates, loaded]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -913,9 +1093,23 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
   const copy = (text: string) => void navigator.clipboard.writeText(text);
   const content = useMemo(() => {
     if (view === "history") return <HistoryView history={history} profiles={settings.profiles} onCopy={copy} onDelete={deleteItem} onStart={() => void start()} />;
-    if (view === "general") return <GeneralView settings={settings} saveState={saveState} saveError={saveError} onSettings={setSettings} />;
+    if (view === "general") {
+      return (
+        <GeneralView
+          settings={settings}
+          saveState={saveState}
+          saveError={saveError}
+          onSettings={setSettings}
+          updateInfo={updateInfo}
+          updateStatus={updateStatus}
+          updateMessage={updateMessage}
+          onCheckUpdates={() => void handleCheckUpdates(false)}
+          onInstallUpdate={() => void handleInstallUpdate()}
+        />
+      );
+    }
     return <ModeView settings={settings} saveState={saveState} saveError={saveError} onSettings={setSettings} onSaveKey={saveKey} onDelete={deleteMode} isRecording={recorder.isRecording} recordingLevelDb={recorder.inputLevelDb} />;
-  }, [history, recorder.inputLevelDb, recorder.isRecording, saveError, saveKey, saveState, settings, start, view]);
+  }, [handleCheckUpdates, handleInstallUpdate, history, recorder.inputLevelDb, recorder.isRecording, saveError, saveKey, saveState, settings, start, updateInfo, updateMessage, updateStatus, view]);
 
   const dictateProfile = state === "idle" ? activeProfile : profile;
 
@@ -929,6 +1123,12 @@ The recording could not be saved: ${saveCause instanceof Error ? saveCause.messa
         onSelectMode={selectMode}
         onAddMode={addMode}
         onDeleteMode={deleteMode}
+        updateInfo={updateInfo}
+        updateStatus={updateStatus}
+        updateMessage={updateMessage}
+        updateDismissed={updateDismissed}
+        onInstallUpdate={() => void handleInstallUpdate()}
+        onDismissUpdate={() => setUpdateDismissed(true)}
         dictate={{
           state,
           profile: dictateProfile,

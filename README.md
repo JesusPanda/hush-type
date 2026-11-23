@@ -32,6 +32,7 @@ You can add, rename, duplicate by configuration, or delete modes. Every mode own
 - API keys stored in Windows Credential Manager or macOS Keychain
 - Tray/menu-bar process so shortcuts keep working when the main window is closed
 - Configurable models, endpoints, language, cleanup prompt, and shortcuts
+- Automatic startup update checks with installer downloads for supported Windows and macOS builds, and a link to GitHub Releases on other platforms
 
 ## Quick start
 
@@ -96,7 +97,7 @@ npm run tauri build
 
 Tauri does not cross-compile a macOS `.app` from Windows; run the same command on a Mac for that artifact. Apple distribution outside your own machine may require signing and notarization.
 
-Version tags matching `v*` trigger the GitHub release workflow. It builds Windows x64 installers and macOS installers for both Apple Silicon and Intel, then attaches them to the matching GitHub Release.
+Pushes to `main` that touch application code automatically bump the patch version when the current version has already been tagged. The workflow applies the resolved version to each build and publishes Windows x64 and macOS (Apple Silicon and Intel) installers under a tag pointing to the source commit. You can trigger a `minor`, `major`, or prerelease build manually from **Actions → Release desktop apps**, or push a `vMAJOR.MINOR.PATCH` tag directly. Add `[skip release]` to a commit message on `main` to skip an automatic release.
 
 ## Permissions
 

@@ -169,6 +169,23 @@ kbd {
 .nav-item.active svg { color: var(--ink); }
 .nav-count { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+/* ---------- Update banner ---------- */
+.update-banner { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 9px 10px; border: 1px solid var(--pig-line); border-radius: 12px; background: var(--pig-soft); }
+.update-banner + .sidebar-footer { margin-top: -16px; }
+.update-banner-head { display: flex; align-items: center; gap: 6px; }
+.update-banner-info { min-width: 0; flex: 1; display: inline-flex; align-items: center; gap: 7px; padding: 0; border: 0; background: transparent; color: var(--ink); font-size: 12.5px; font-weight: 550; text-align: left; }
+.update-banner-info svg { flex: none; color: var(--pig); }
+.update-banner-info span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-banner-info:hover { color: var(--pig); }
+.update-banner-dismiss { width: 22px; height: 22px; display: grid; flex: none; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ink-3); }
+.update-banner-dismiss:hover { background: var(--raise); color: var(--ink); }
+.update-banner-cta { width: 100%; height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--pig); color: var(--on-pig); font-size: 12px; font-weight: 600; }
+.update-banner-cta:hover:not(:disabled) { filter: brightness(1.08); }
+.update-banner-cta:disabled { opacity: .75; cursor: progress; }
+.update-banner-cta .spinner { border-color: color-mix(in oklab, var(--on-pig) 25%, transparent); border-top-color: var(--on-pig); }
+.update-banner-msg { margin: 0; color: var(--ink-2); font-size: 11.5px; line-height: 1.4; }
+.update-banner-msg.error { color: var(--coral); }
+
 /* ---------- Dictate control ---------- */
 .sidebar-footer { margin-top: auto; }
 .dictate-wrap { position: relative; }
@@ -389,6 +406,27 @@ label.setting-row { cursor: pointer; }
 .range::-moz-range-thumb { width: 12px; height: 12px; border: 3px solid var(--ground); border-radius: 50%; background: var(--pig); }
 .range:disabled { cursor: default; }
 .range-scale { display: flex; justify-content: space-between; margin-top: 6px; color: var(--ink-3); font-size: 11.5px; }
+.update-row { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
+.update-row-main { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; }
+.update-row-main > div:first-child { min-width: 0; flex: 1 1 220px; }
+.update-version { margin-left: 6px; padding: 2px 8px; border-radius: 999px; background: var(--raise); color: var(--ink-2); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; vertical-align: 1px; }
+.update-status.available { color: var(--pig); }
+.update-status.error { color: var(--coral); }
+.update-status.installed { color: var(--ink); }
+.update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: none; }
+.update-actions button { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: 12.5px; font-weight: 500; }
+.update-actions button:hover:not(:disabled) { border-color: var(--line-3); background: var(--raise); }
+.update-actions button:disabled { opacity: .55; cursor: default; }
+.update-actions button.primary { border-color: var(--pig); background: var(--pig); color: var(--on-pig); font-weight: 600; }
+.update-actions button.primary:hover:not(:disabled) { border-color: var(--pig); background: var(--pig); filter: brightness(1.08); }
+.update-actions button.primary .spinner { border-color: color-mix(in oklab, var(--on-pig) 25%, transparent); border-top-color: var(--on-pig); }
+.update-notes { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.update-notes summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; color: var(--ink-2); font-size: 12.5px; font-weight: 500; list-style: none; cursor: pointer; }
+.update-notes summary::-webkit-details-marker { display: none; }
+.update-notes summary:hover { background: var(--raise); color: var(--ink); }
+.update-notes summary svg { flex: none; color: var(--ink-3); transition: transform .15s ease; }
+.update-notes[open] summary svg { transform: rotate(180deg); }
+.update-notes pre { max-height: 220px; margin: 0; padding: 11px 12px; overflow: auto; border-top: 1px solid var(--line); background: var(--well); color: var(--ink-2); font: 12px/1.6 var(--sans); white-space: pre-wrap; word-break: break-word; user-select: text; }
 .footnote { display: flex; align-items: center; gap: 9px; margin: 20px 0 0; color: var(--ink-3); font-size: 12.5px; }
 .status-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #79d8c6; box-shadow: 0 0 0 3px rgba(121, 216, 198, .14); }
 
@@ -494,8 +532,8 @@ label.setting-row { cursor: pointer; }
 @keyframes breathe { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--pig) 45%, transparent); } 50% { box-shadow: 0 0 0 6px transparent; } }
 
 /* ---------- Floating capsule (the overlay window, and its preview in General) ---------- */
-.overlay-document, .overlay-document body, .overlay-document #root { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: transparent !important; }
-.overlay-stage { width: 100vw; height: 100vh; display: grid; place-items: center; }
+:root.overlay-document, .overlay-document, .overlay-document body, .overlay-document #root { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; overscroll-behavior: none; background: transparent !important; background-color: transparent !important; }
+.overlay-stage { width: 100vw; height: 100vh; display: grid; place-items: center; background: transparent; }
 .capsule {
   --pig: #b8a4ff;
   display: inline-flex;

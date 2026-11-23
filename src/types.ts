@@ -88,6 +88,17 @@ export interface AppSettings {
   overlayEnabled: boolean;
   overlaySuccessDurationMs?: number;
   overlayPosition?: { x: number; y: number };
+  checkUpdatesOnStartup?: boolean;
+}
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseName: string;
+  releaseNotes: string;
+  releaseUrl: string;
+  assetName?: string | null;
 }
 
 export interface HistoryItem {
@@ -198,6 +209,7 @@ export const unusedPigment = (profiles: DictationProfile[]) => {
 
 export const normalizeSettings = (settings: AppSettings): AppSettings => ({
   ...settings,
+  checkUpdatesOnStartup: settings.checkUpdatesOnStartup ?? true,
   profiles: settings.profiles.map((profile) => ({
     ...profile,
     transcriptionPrompt: profile.transcriptionPrompt ?? "",
@@ -649,6 +661,7 @@ export const createDefaultSettings = (): AppSettings => ({
   cancelShortcut: "CommandOrControl+Shift+Escape",
   overlayEnabled: true,
   overlaySuccessDurationMs: 650,
+  checkUpdatesOnStartup: true,
 });
 
 export const DEFAULT_SETTINGS = createDefaultSettings();

@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "HushType",
@@ -29,10 +30,10 @@
         "title": "HushType recording",
         "label": "overlay",
         "url": "index.html?overlay=1",
-        "width": 96,
-        "height": 52,
-        "minWidth": 96,
-        "minHeight": 52,
+        "width": 112,
+        "height": 64,
+        "minWidth": 112,
+        "minHeight": 64,
         "visible": false,
         "resizable": false,
         "fullscreen": false,
