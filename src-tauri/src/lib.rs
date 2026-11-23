@@ -1589,6 +1589,13 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            #[cfg(target_os = "macos")]
+            if let Some(overlay) = app.get_webview_window("overlay") {
+                // Ensure NSWindow and WKWebView under-page backgrounds stay transparent on macOS.
+                let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                let _ = overlay.set_shadow(false);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
